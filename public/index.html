@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plant Tracker - Shared</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50">
+    <div id="app" class="min-h-screen"></div>
+    
+    <script>
+    // Plant Tracker App with D1 Database
+    let currentRole = localStorage.getItem('role') || null;
+    let plants = [];
+    let rooms = [];
+
+    // API base URL (will be set after deployment)
+    const API_BASE = '/api';
+
+    // Initialize app
+    async function init() {
+        if (!currentRole) {
+            showRoleSelector();
+        } else {
+            await loadData();
+            showDashboard();
+        }
+    }
+
+    // Show role selector
+    function showRoleSelector() {
+        document.getElementById('app').innerHTML = `
+            <div class="max-w-md mx-auto mt-10 p-6">
+                <h1 class="text-3xl font-bold mb-2">🌱 Plant Tracker</h1>
+                <p class="text-gray-600 mb-6">Shared plant care system - everyone sees the same plants!</p>
+                <p class="font-medium mb-4">Who are you?</p>
+                <div class="space-y-2">
+                    ${['Ben', 'Jared', 'Guest1', 'Guest2'].map(role => `
+                        <button onclick="selectRole('${role}')" 
+                                class="w-full p-4 bg-green-500 text-white rounded-lg hover:bg-green-600">
+                            ${role}
+                        </button>
+                    `).join('')}
+                </div>
+                <p class="text-xs text-gray-500 mt-4">
+                    Note: This only identifies who performs actions. All users share the same plant database.
+                </p>
+            </div>
+        `;
+    }
+
+    // Select role
+    async function selectRole(role) {
+        currentRole = role;
+        localStorage.setItem('role', role);
+        await loadData();
+        showDashboard();
+    }
+
+    // Load data from API
+    async function loadData() {
+        try {
+            // Load rooms
+            const roomsRes = await fetch(`${API_BASE}/rooms`);
+            rooms = await roomsRes.json();
+            
+            // Load plants
+            const plantsRes = await fetch(`${API_BASE}/plants`);
+            plants = await plantsRes.json();
+            
+            // Calculate days until water for display
+            plants = plants.map(plant => ({
+                ...plant,
+                daysUntilWater: calculateDaysUntil(plant.lastWateredAt, plant.waterIntervalDays),
+                daysUntilFertilize: calculateDaysUntil(plant.lastFertilizedAt, plant.fertilizeIntervalDays)
+            }));
+        } catch (error) {
+            console.error('Error loading data:', error);
+        }
+    }
+
+    // Calculate days until next care
+    function calculateDaysUntil(lastDate, interval) {
+        if (!lastDate) return -interval;
+        const last = new Date(lastDate);
+        const now = new Date();
+        const daysSince = Math.floor((now - last) / (1000 * 60 * 60 * 24));
+        return interval - daysSince;
+    }
+
+    // Show dashboard
+    function showDashboard() {
+        const needWater = plants.filter(p => p.daysUntilWater <= 0).length;
+        const checkSoon = plants.filter(p => p.daysUntilWater > 0 && p.daysUntilWater <= 2).length;
+        
+        document.getElementById('app').innerHTML = `
+            <div class="max-w-6xl mx-auto p-4 pb-20">
+                <!-- Header -->
+                <div class="bg-white rounded-lg shadow-sm p-4 mb-4">
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <h1 class="text-2xl font-bold">🌱 Plant Tracker</h1>
+                            <p class="text-sm text-gray-600">Shared Database - All users see the same plants</p>
+                        </div>
+                        <div class="text-right">
+                            <p class="text-sm text-gray-600">Logged in as:</p>
+                            <p class="font-medium">${currentRole}</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Status Overview -->
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                    <div class="bg-red-100 p-3 rounded-lg">
+                        <div class="text-2xl font-bold text-red-600">${needWater}</div>
+                        <div class="text-xs text-red-800">Need Water Now</div>
+                    </div>
+                    <div class="bg-yellow-100 p-3 rounded-lg">
+                        <div class="text-2xl font-bold text-yellow-600">${checkSoon}</div>
+                        <div class="text-xs text-yellow-800">Check Soon</div>
+                    </div>
+                    <div class="bg-green-100 p-3 rounded-lg">
+                        <div class="text-2xl font-bold text-green-600">${plants.filter(p => p.daysUntilWater > 2).length}</div>
+                        <div class="text-xs text-green-800">Doing OK</div>
+                    </div>
+                    <div class="bg-blue-100 p-3 rounded-lg">
+                        <div class="text-2xl font-bold text-blue-600">${plants.length}/50</div>
+                        <div class="text-xs text-blue-800">Total Plants</div>
+                    </div>
+                </div>
+
+                <!-- Add Plant Button -->
+                ${plants.length < 50 ? `
+                    <button onclick="showAddPlantForm()" 
+                            class="w-full md:w-auto px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 mb-4">
+                        + Add New Plant
+                    </button>
+                ` : `
+                    <div class="bg-yellow-100 border border-yellow-300 p-3 rounded-lg mb-4">
+                        Maximum 50 plants reached!
+                    </div>
+                `}
+
+                <!-- Plants List -->
+                <div class="space-y-3">
+                    ${plants.length === 0 ? `
+                        <div class="bg-white p-8 rounded-lg text-center text-gray-500">
+                            <p class="text-xl mb-2">No plants yet!</p>
+                            <p>Be the first to add a plant to the shared collection</p>
+                        </div>
+                    ` : plants.sort((a, b) => a.daysUntilWater - b.daysUntilWater).map(plant => {
+                        const room = rooms.find(r => r.id === plant.roomId);
+                        return `
+                            <div class="bg-white p-4 rounded-lg shadow-sm">
+                                <div class="flex justify-between items-start">
+                                    <div>
+                                        <h3 class="font-bold text-lg">
+                                            ${plant.nickname || plant.species}
+                                            ${plant.nickname ? `<span class="text-gray-500 font-normal text-sm">(${plant.species})</span>` : ''}
+                                        </h3>
+                                        <p class="text-sm text-gray-600">
+                                            📍 ${room?.name || 'Unknown'} | 
+                                            ☀️ ${plant.lightLevel} light | 
+                                            💧 Every ${plant.waterIntervalDays} days
+                                        </p>
+                                        <p class="text-xs text-gray-500 mt-1">
+                                            Added by ${plant.addedBy} on ${new Date(plant.createdAt).toLocaleDateString()}
+                                        </p>
+                                    </div>
+                                    <div class="text-right">
+                                        ${plant.daysUntilWater <= 0 ? `
+                                            <span class="inline-block px-3 py-1 bg-red-500 text-white rounded-full text-sm">
+                                                💧 Water Now!
+                                            </span>
+                                        ` : plant.daysUntilWater <= 2 ? `
+                                            <span class="inline-block px-3 py-1 bg-yellow-500 text-white rounded-full text-sm">
+                                                Check in ${plant.daysUntilWater} day${plant.daysUntilWater === 1 ? '' : 's'}
+                                            </span>
+                                        ` : `
+                                            <span class="inline-block px-3 py-1 bg-green-500 text-white rounded-full text-sm">
+                                                OK for ${plant.daysUntilWater} days
+                                            </span>
+                                        `}
+                                    </div>
+                                </div>
+                                <div class="mt-3 flex gap-2">
+                                    <button onclick="waterPlant(${plant.id})" 
+                                            class="px-3 py-1 bg-blue-500 text-white text-sm rounded hover:bg-blue-600">
+                                        💧 Mark as Watered
+                                    </button>
+                                    <button onclick="showPlantHistory(${plant.id})" 
+                                            class="px-3 py-1 bg-gray-500 text-white text-sm rounded hover:bg-gray-600">
+                                        📜 History
+                                    </button>
+                                    <button onclick="deletePlant(${plant.id})" 
+                                            class="px-3 py-1 bg-red-500 text-white text-sm rounded hover:bg-red-600">
+                                        🗑️ Remove
+                                    </button>
+                                </div>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+
+                <!-- Footer -->
+                <div class="mt-8 text-center text-sm text-gray-500">
+                    <button onclick="loadData().then(showDashboard)" class="text-blue-500 hover:underline">
+                        🔄 Refresh Data
+                    </button>
+                    <span class="mx-2">|</span>
+                    <button onclick="showRoleSelector()" class="hover:underline">
+                        Switch Role
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
+    // Show add plant form
+    function showAddPlantForm() {
+        document.getElementById('app').innerHTML = `
+            <div class="max-w-md mx-auto mt-10 p-6 bg-white rounded-lg shadow">
+                <h2 class="text-2xl font-bold mb-4">Add New Plant</h2>
+                <form onsubmit="addPlant(event)">
+                    <div class="mb-3">
+                        <label class="block text-sm font-medium mb-1">Species *</label>
+                        <input type="text" id="species" required 
+                               class="w-full p-2 border rounded">
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label class="block text-sm font-medium mb-1">Nickname</label>
+                        <input type="text" id="nickname" 
+                               class="w-full p-2 border rounded">
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label class="block text-sm font-medium mb-1">Room *</label>
+                        <select id="roomId" required class="w-full p-2 border rounded">
+                            ${rooms.map(room => 
+                                `<option value="${room.id}">${room.name}</option>`
+                            ).join('')}
+                        </select>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label class="block text-sm font-medium mb-1">Light Level *</label>
+                        <select id="lightLevel" required class="w-full p-2 border rounded">
+                            <option value="low">Low Light</option>
+                            <option value="medium">Medium Light</option>
+                            <option value="bright">Bright Light</option>
+                            <option value="direct">Direct Sun</option>
+                        </select>
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium mb-1">Water Every (days) *</label>
+                        <input type="number" id="waterIntervalDays" required 
+                               class="w-full p-2 border rounded"
+                               min="1" max="60" value="7">
+                    </div>
+                    
+                    <div class="flex gap-2">
+                        <button type="submit" 
+                                class="flex-1 p-2 bg-green-500 text-white rounded hover:bg-green-600">
+                            Add Plant
+                        </button>
+                        <button type="button" onclick="showDashboard()" 
+                                class="flex-1 p-2 bg-gray-300 rounded hover:bg-gray-400">
+                            Cancel
+                        </button>
+                    </div>
+                </form>
+            </div>
+        `;
+    }
+
+    // Add plant
+    async function addPlant(event) {
+        event.preventDefault();
+        
+        const plantData = {
+            species: document.getElementById('species').value,
+            nickname: document.getElementById('nickname').value,
+            roomId: parseInt(document.getElementById('roomId').value),
+            lightLevel: document.getElementById('lightLevel').value,
+            waterIntervalDays: parseInt(document.getElementById('waterIntervalDays').value),
+            addedBy: currentRole
+        };
+        
+        try {
+            const response = await fetch(`${API_BASE}/plants`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(plantData)
+            });
+            
+            if (response.ok) {
+                await loadData();
+                showDashboard();
+                showToast('Plant added successfully!', 'success');
+            } else {
+                showToast('Error adding plant', 'error');
+            }
+        } catch (error) {
+            showToast('Network error', 'error');
+        }
+    }
+
+    // Water plant
+    async function waterPlant(plantId) {
+        try {
+            const response = await fetch(`${API_BASE}/plants/${plantId}/water`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ performedBy: currentRole })
+            });
+            
+            if (response.ok) {
+                await loadData();
+                showDashboard();
+                showToast('Plant watered!', 'success');
+            }
+        } catch (error) {
+            showToast('Error watering plant', 'error');
+        }
+    }
+
+    // Delete plant
+    async function deletePlant(plantId) {
+        if (!confirm('Remove this plant? This cannot be undone.')) return;
+        
+        try {
+            const response = await fetch(`${API_BASE}/plants/${plantId}`, {
+                method: 'DELETE'
+            });
+            
+            if (response.ok) {
+                await loadData();
+                showDashboard();
+                showToast('Plant removed', 'success');
+            }
+        } catch (error) {
+            showToast('Error removing plant', 'error');
+        }
+    }
+
+    // Show plant history
+    async function showPlantHistory(plantId) {
+        try {
+            const response = await fetch(`${API_BASE}/plants/${plantId}/events`);
+            const events = await response.json();
+            const plant = plants.find(p => p.id === plantId);
+            
+            let historyHtml = events.map(event => `
+                <div class="border-l-2 border-gray-200 pl-3 py-2">
+                    <p class="text-sm">
+                        <span class="font-medium">${event.performedBy}</span>
+                        ${event.eventType === 'water' ? '💧 watered' : '📝 ' + event.eventType}
+                    </p>
+                    <p class="text-xs text-gray-500">
+                        ${new Date(event.performedAt).toLocaleString()}
+                    </p>
+                </div>
+            `).join('');
+            
+            if (events.length === 0) {
+                historyHtml = '<p class="text-gray-500">No history yet</p>';
+            }
+            
+            document.getElementById('app').innerHTML = `
+                <div class="max-w-md mx-auto mt-10 p-6 bg-white rounded-lg shadow">
+                    <h2 class="text-xl font-bold mb-4">
+                        History: ${plant.nickname || plant.species}
+                    </h2>
+                    <div class="space-y-1 mb-4">
+                        ${historyHtml}
+                    </div>
+                    <button onclick="showDashboard()" 
+                            class="w-full p-2 bg-gray-300 rounded hover:bg-gray-400">
+                        Back to Dashboard
+                    </button>
+                </div>
+            `;
+        } catch (error) {
+            showToast('Error loading history', 'error');
+        }
+    }
+
+    // Show toast notification
+    function showToast(message, type = 'info') {
+        const colors = {
+            success: 'bg-green-500',
+            error: 'bg-red-500',
+            info: 'bg-blue-500'
+        };
+        
+        const toast = document.createElement('div');
+        toast.className = `fixed top-4 right-4 px-4 py-2 text-white rounded-lg shadow-lg ${colors[type]} z-50`;
+        toast.textContent = message;
+        document.body.appendChild(toast);
+        
+        setTimeout(() => toast.remove(), 3000);
+    }
+
+    // Start app
+    init();
+    </script>
+</body>
+</html>
