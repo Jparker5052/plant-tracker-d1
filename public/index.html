@@ -2,378 +2,1196 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
     <title>Plant Tracker</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="manifest" href="/manifest.json">
     <style>
-        .hidden { display: none; }
-        .fade-in { animation: fadeIn 0.3s ease-out; }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        * { -webkit-tap-highlight-color: transparent; }
+        .slide-panel { 
+            animation: slideUp 0.3s ease-out;
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            max-height: 90vh;
+            z-index: 50;
+        }
+        @keyframes slideUp { 
+            from { transform: translateY(100%); } 
+            to { transform: translateY(0); } 
+        }
+        .room-section { transition: max-height 0.3s ease-out; }
+        .collapsed { max-height: 60px; overflow: hidden; }
+        .expanded { max-height: 2000px; }
     </style>
 </head>
-<body class="bg-gray-50">
-    <div id="app" class="min-h-screen"></div>
-    
+<body class="bg-gray-50 pb-20">
+    <div id="app"></div>
+    <div id="quickPanel"></div>
+    <div id="toast" class="fixed top-4 right-4 z-50"></div>
+
     <script>
-    // Plant Tracker App - Professional Version
-    let currentRole = localStorage.getItem('role') || null;
-    let plants = [];
-    let rooms = [];
-    let filters = { status: null, search: '' };
+    // =====================================
+    // PLANT TRACKER - FULL SPEC VERSION
+    // =====================================
 
-    // API Configuration
-    const API_BASE = '/api';
+    const APP = {
+        role: localStorage.getItem('role') || null,
+        plants: [],
+        rooms: [],
+        careEvents: [],
+        filters: {
+            status: null,
+            room: null,
+            species: null,
+            lightLevel: null,
+            search: ''
+        },
+        collapsedRooms: new Set(),
+        selectedPlant: null,
+        adaptiveIntervals: {} // plantId -> last 5 intervals
+    };
 
-    // Initialize app
-    async function init() {
-        if (!currentRole) {
-            showRoleSelector();
+    // =====================================
+    // STATUS LOGIC (per spec)
+    // =====================================
+    
+    function calculatePlantStatus(plant, careEvents = []) {
+        const now = new Date();
+        
+        // Calculate days since last water
+        let daysSinceWater = null;
+        let daysUntilWater = null;
+        
+        if (plant.lastWateredAt) {
+            const lastWatered = new Date(plant.lastWateredAt);
+            daysSinceWater = Math.floor((now - lastWatered) / (86400000));
+            daysUntilWater = plant.waterIntervalDays - daysSinceWater;
         } else {
-            await loadData();
-            showDashboard();
+            daysUntilWater = -plant.waterIntervalDays;
         }
-    }
-
-    // Show role selector
-    function showRoleSelector() {
-        document.getElementById('app').innerHTML = `
-            <div class="flex items-center justify-center min-h-screen p-4">
-                <div class="bg-white rounded-xl shadow-xl p-8 w-full max-w-md">
-                    <h1 class="text-3xl font-bold text-center mb-2">🌱 Plant Tracker</h1>
-                    <p class="text-gray-600 text-center mb-6">Select your identity</p>
-                    <div class="space-y-2">
-                        <button onclick="selectRole('Ben')" class="w-full p-3 bg-green-500 text-white rounded-lg hover:bg-green-600">Ben</button>
-                        <button onclick="selectRole('Jared')" class="w-full p-3 bg-green-500 text-white rounded-lg hover:bg-green-600">Jared</button>
-                        <button onclick="selectRole('Guest1')" class="w-full p-3 bg-green-500 text-white rounded-lg hover:bg-green-600">Guest1</button>
-                        <button onclick="selectRole('Guest2')" class="w-full p-3 bg-green-500 text-white rounded-lg hover:bg-green-600">Guest2</button>
-                    </div>
-                </div>
-            </div>
-        `;
-    }
-
-    // Select role
-    async function selectRole(role) {
-        currentRole = role;
-        localStorage.setItem('role', role);
-        await loadData();
-        showDashboard();
-    }
-
-    // Load data from API
-    async function loadData() {
-        try {
-            const [roomsRes, plantsRes] = await Promise.all([
-                fetch(API_BASE + '/rooms'),
-                fetch(API_BASE + '/plants')
-            ]);
-            
-            rooms = await roomsRes.json();
-            plants = await plantsRes.json();
-            
-            // Calculate status for each plant
-            plants = plants.map(plant => {
-                const status = calculatePlantStatus(plant);
-                return { ...plant, ...status };
-            });
-            
-            // Sort by urgency
-            plants.sort((a, b) => {
-                const order = { 'Due': 0, 'Needs Check': 1, 'Snoozed': 2, 'OK': 3 };
-                return order[a.status] - order[b.status];
-            });
-        } catch (error) {
-            console.error('Error loading data:', error);
+        
+        // Check for active snooze
+        const snoozeEvents = careEvents.filter(e => 
+            e.plantId === plant.id && 
+            e.eventType === 'snooze'
+        ).sort((a, b) => new Date(b.performedAt) - new Date(a.performedAt));
+        
+        let snoozedUntil = null;
+        if (snoozeEvents.length > 0) {
+            const lastSnooze = snoozeEvents[0];
+            const snoozeEnd = new Date(lastSnooze.performedAt);
+            snoozeEnd.setDate(snoozeEnd.getDate() + (lastSnooze.snoozeDays || 0));
+            if (snoozeEnd > now) {
+                snoozedUntil = snoozeEnd.toISOString();
+            }
         }
+        
+        // Determine status (per spec)
+        let status = 'OK';
+        let urgency = 3;
+        
+        if (snoozedUntil) {
+            status = 'Snoozed';
+            urgency = 2;
+        } else if (daysUntilWater <= 0) {
+            status = 'Due';
+            urgency = 0;
+        } else if (daysUntilWater <= 2) {
+            status = 'Needs Check';
+            urgency = 1;
+        }
+        
+        // Check fertilize status (if not in seasonal pause)
+        let daysUntilFertilize = null;
+        if (plant.lastFertilizedAt && !isInSeasonalPause(plant)) {
+            const lastFertilized = new Date(plant.lastFertilizedAt);
+            const daysSinceFertilize = Math.floor((now - lastFertilized) / (86400000));
+            daysUntilFertilize = plant.fertilizeIntervalDays - daysSinceFertilize;
+            
+            if (!snoozedUntil) {
+                if (daysUntilFertilize <= 0 && status !== 'Due') {
+                    status = 'Due';
+                    urgency = 0;
+                } else if (daysUntilFertilize <= 2 && status === 'OK') {
+                    status = 'Needs Check';
+                    urgency = 1;
+                }
+            }
+        }
+        
+        return {
+            status,
+            urgency,
+            daysUntilWater,
+            daysUntilFertilize,
+            daysSinceWater,
+            snoozedUntil
+        };
     }
-
-    // Calculate plant status
-    function calculatePlantStatus(plant) {
-        if (!plant.lastWateredAt) {
-            return { status: 'Due', daysUntilWater: 0, daysSince: 'Never' };
+    
+    function isInSeasonalPause(plant) {
+        if (!plant.fertilizeSeasonalPauseStart || !plant.fertilizeSeasonalPauseEnd) {
+            return false;
         }
         
         const now = new Date();
-        const lastWatered = new Date(plant.lastWateredAt);
-        const daysSince = Math.floor((now - lastWatered) / (1000 * 60 * 60 * 24));
-        const daysUntilWater = plant.waterIntervalDays - daysSince;
+        const today = now.toISOString().split('T')[0];
         
-        let status;
-        if (daysUntilWater <= 0) {
-            status = 'Due';
-        } else if (daysUntilWater <= 2) {
-            status = 'Needs Check';
-        } else {
-            status = 'OK';
+        return today >= plant.fertilizeSeasonalPauseStart && 
+               today <= plant.fertilizeSeasonalPauseEnd;
+    }
+    
+    function calculateAdaptiveInterval(plantId) {
+        const intervals = APP.adaptiveIntervals[plantId] || [];
+        if (intervals.length === 0) return null;
+        
+        const avg = intervals.reduce((sum, val) => sum + val, 0) / intervals.length;
+        return Math.max(1, Math.min(60, Math.round(avg)));
+    }
+    
+    function updateAdaptiveInterval(plantId, actualInterval) {
+        if (!APP.adaptiveIntervals[plantId]) {
+            APP.adaptiveIntervals[plantId] = [];
         }
         
-        return { status, daysUntilWater, daysSince };
+        APP.adaptiveIntervals[plantId].push(actualInterval);
+        
+        // Keep only last 5
+        if (APP.adaptiveIntervals[plantId].length > 5) {
+            APP.adaptiveIntervals[plantId].shift();
+        }
+        
+        // Save to localStorage
+        localStorage.setItem('adaptiveIntervals', JSON.stringify(APP.adaptiveIntervals));
     }
 
-    // Show dashboard
-    function showDashboard() {
-        // Apply filters
-        let filteredPlants = [...plants];
-        if (filters.status) {
-            filteredPlants = filteredPlants.filter(p => p.status === filters.status);
+    // =====================================
+    // UI COMPONENTS
+    // =====================================
+
+    function showToast(message, type = 'info') {
+        const colors = {
+            success: 'bg-green-600',
+            error: 'bg-red-600',
+            warning: 'bg-yellow-600',
+            info: 'bg-blue-600'
+        };
+        
+        const toast = document.createElement('div');
+        toast.className = `${colors[type]} text-white px-6 py-3 rounded-lg shadow-lg mb-2 animate-pulse`;
+        toast.textContent = message;
+        
+        document.getElementById('toast').appendChild(toast);
+        setTimeout(() => toast.remove(), 3000);
+    }
+
+    function renderApp() {
+        if (!APP.role) {
+            renderRoleSelector();
+        } else {
+            renderDashboard();
         }
-        if (filters.search) {
-            const search = filters.search.toLowerCase();
+    }
+
+    function renderRoleSelector() {
+        document.getElementById('app').innerHTML = `
+            <div class="min-h-screen flex items-center justify-center p-4">
+                <div class="bg-white rounded-2xl shadow-xl p-8 w-full max-w-md">
+                    <h1 class="text-3xl font-bold text-center mb-2">🌱 Plant Tracker</h1>
+                    <p class="text-gray-600 text-center mb-6">
+                        Track shared houseplants. Optimized for quick daily check-ins.
+                    </p>
+                    <p class="font-medium mb-4">Select your role:</p>
+                    <div class="space-y-3">
+                        ${['Ben', 'Jared', 'Guest1', 'Guest2'].map(role => `
+                            <button 
+                                onclick="selectRole('${role}')"
+                                class="w-full p-4 bg-green-500 hover:bg-green-600 text-white rounded-lg font-medium text-lg transition-colors"
+                                aria-label="Select role ${role}"
+                            >
+                                ${role}
+                            </button>
+                        `).join('')}
+                    </div>
+                    <p class="text-xs text-gray-500 text-center mt-6">
+                        Role identifies who performs actions. All data is shared.
+                    </p>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderDashboard() {
+        // Calculate status for all plants
+        const plantsWithStatus = APP.plants.map(plant => ({
+            ...plant,
+            statusInfo: calculatePlantStatus(plant, APP.careEvents)
+        }));
+        
+        // Apply filters
+        let filteredPlants = plantsWithStatus;
+        
+        if (APP.filters.status) {
+            filteredPlants = filteredPlants.filter(p => p.statusInfo.status === APP.filters.status);
+        }
+        if (APP.filters.room) {
+            filteredPlants = filteredPlants.filter(p => p.roomId == APP.filters.room);
+        }
+        if (APP.filters.species) {
+            filteredPlants = filteredPlants.filter(p => p.species === APP.filters.species);
+        }
+        if (APP.filters.lightLevel) {
+            filteredPlants = filteredPlants.filter(p => p.lightLevel === APP.filters.lightLevel);
+        }
+        if (APP.filters.search) {
+            const search = APP.filters.search.toLowerCase();
             filteredPlants = filteredPlants.filter(p => 
-                p.species.toLowerCase().includes(search) || 
+                p.species.toLowerCase().includes(search) ||
                 (p.nickname && p.nickname.toLowerCase().includes(search))
             );
         }
-
+        
+        // Group by room and sort by urgency
+        const plantsByRoom = {};
+        APP.rooms.forEach(room => {
+            const roomPlants = filteredPlants.filter(p => p.roomId == room.id);
+            // Sort by urgency then by days until water
+            roomPlants.sort((a, b) => {
+                if (a.statusInfo.urgency !== b.statusInfo.urgency) {
+                    return a.statusInfo.urgency - b.statusInfo.urgency;
+                }
+                return a.statusInfo.daysUntilWater - b.statusInfo.daysUntilWater;
+            });
+            plantsByRoom[room.id] = roomPlants;
+        });
+        
         // Count statuses
         const statusCounts = {
-            'Due': plants.filter(p => p.status === 'Due').length,
-            'Needs Check': plants.filter(p => p.status === 'Needs Check').length,
-            'OK': plants.filter(p => p.status === 'OK').length
+            'Due': plantsWithStatus.filter(p => p.statusInfo.status === 'Due').length,
+            'Needs Check': plantsWithStatus.filter(p => p.statusInfo.status === 'Needs Check').length,
+            'Snoozed': plantsWithStatus.filter(p => p.statusInfo.status === 'Snoozed').length,
+            'OK': plantsWithStatus.filter(p => p.statusInfo.status === 'OK').length
         };
-
+        
         document.getElementById('app').innerHTML = `
-            <div class="max-w-6xl mx-auto p-4">
-                <!-- Header -->
-                <div class="bg-white rounded-lg shadow mb-4 p-4">
+            <!-- Dashboard Header -->
+            <div class="sticky top-0 z-20 bg-white shadow-sm">
+                <div class="p-4">
                     <div class="flex justify-between items-center mb-3">
-                        <h1 class="text-2xl font-bold">🌱 Plant Tracker</h1>
-                        <div>
-                            <span class="text-sm text-gray-600">Logged in as: </span>
-                            <span class="font-medium">${currentRole}</span>
+                        <h1 class="text-2xl font-bold">Plant Tracker</h1>
+                        <div class="text-right">
+                            <div class="text-xs text-gray-500">Role</div>
+                            <div class="font-medium">${APP.role}</div>
                         </div>
                     </div>
                     
-                    <!-- Status Filters -->
-                    <div class="flex gap-2 mb-3">
-                        <button onclick="setStatusFilter('Due')" 
-                                class="${filters.status === 'Due' ? 'bg-red-500 text-white' : 'bg-red-100 text-red-700'} px-3 py-1 rounded-full text-sm">
-                            Due (${statusCounts['Due']})
-                        </button>
-                        <button onclick="setStatusFilter('Needs Check')" 
-                                class="${filters.status === 'Needs Check' ? 'bg-yellow-500 text-white' : 'bg-yellow-100 text-yellow-700'} px-3 py-1 rounded-full text-sm">
-                            Needs Check (${statusCounts['Needs Check']})
-                        </button>
-                        <button onclick="setStatusFilter('OK')" 
-                                class="${filters.status === 'OK' ? 'bg-green-500 text-white' : 'bg-green-100 text-green-700'} px-3 py-1 rounded-full text-sm">
-                            OK (${statusCounts['OK']})
-                        </button>
-                        ${filters.status ? `
-                            <button onclick="setStatusFilter(null)" class="bg-gray-200 text-gray-700 px-3 py-1 rounded-full text-sm">
-                                Clear
-                            </button>
-                        ` : ''}
+                    <!-- Status Chips (tap to filter) -->
+                    <div class="flex gap-2 overflow-x-auto pb-2">
+                        ${Object.entries(statusCounts).map(([status, count]) => {
+                            const colors = {
+                                'Due': APP.filters.status === status ? 'bg-red-600' : 'bg-red-100 text-red-700',
+                                'Needs Check': APP.filters.status === status ? 'bg-yellow-600' : 'bg-yellow-100 text-yellow-700',
+                                'Snoozed': APP.filters.status === status ? 'bg-blue-600' : 'bg-blue-100 text-blue-700',
+                                'OK': APP.filters.status === status ? 'bg-green-600' : 'bg-green-100 text-green-700'
+                            };
+                            return `
+                                <button 
+                                    onclick="toggleFilter('status', '${status}')"
+                                    class="${colors[status]} ${APP.filters.status === status ? 'text-white' : ''} px-3 py-1 rounded-full text-sm font-medium whitespace-nowrap"
+                                    aria-label="Filter by ${status}"
+                                >
+                                    ${status} (${count})
+                                </button>
+                            `;
+                        }).join('')}
+                    </div>
+                    
+                    <!-- Filters -->
+                    <div class="grid grid-cols-2 gap-2 mt-2">
+                        <select onchange="setFilter('room', this.value)" class="p-2 border rounded-lg text-sm">
+                            <option value="">All Rooms</option>
+                            ${APP.rooms.map(r => `
+                                <option value="${r.id}" ${APP.filters.room == r.id ? 'selected' : ''}>
+                                    ${r.name}
+                                </option>
+                            `).join('')}
+                        </select>
+                        
+                        <select onchange="setFilter('lightLevel', this.value)" class="p-2 border rounded-lg text-sm">
+                            <option value="">All Light Levels</option>
+                            <option value="low" ${APP.filters.lightLevel === 'low' ? 'selected' : ''}>Low</option>
+                            <option value="medium" ${APP.filters.lightLevel === 'medium' ? 'selected' : ''}>Medium</option>
+                            <option value="bright" ${APP.filters.lightLevel === 'bright' ? 'selected' : ''}>Bright</option>
+                            <option value="direct" ${APP.filters.lightLevel === 'direct' ? 'selected' : ''}>Direct</option>
+                        </select>
                     </div>
                     
                     <!-- Search -->
-                    <input type="text" 
-                           placeholder="Search plants..." 
-                           oninput="filters.search = this.value; showDashboard()"
-                           value="${filters.search}"
-                           class="w-full p-2 border rounded-lg">
-                </div>
-
-                <!-- Add Plant Button -->
-                ${plants.length < 50 ? `
-                    <button onclick="showAddPlantForm()" 
-                            class="mb-4 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600">
-                        + Add New Plant
-                    </button>
-                ` : `
-                    <div class="mb-4 p-3 bg-yellow-100 rounded-lg">
-                        <p class="text-yellow-800">Maximum 50 plants reached!</p>
+                    <div class="mt-2">
+                        <input 
+                            type="search"
+                            placeholder="Search species or nickname..."
+                            value="${APP.filters.search}"
+                            oninput="setFilter('search', this.value)"
+                            class="w-full p-2 border rounded-lg"
+                        />
                     </div>
-                `}
-
-                <!-- Plants List -->
-                <div class="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-                    ${filteredPlants.length === 0 ? `
-                        <div class="col-span-full bg-white p-8 rounded-lg text-center text-gray-500">
-                            ${plants.length === 0 ? 'No plants yet. Add your first plant!' : 'No plants match your filters.'}
-                        </div>
-                    ` : filteredPlants.map(plant => `
-                        <div class="bg-white rounded-lg shadow p-4">
-                            <div class="flex justify-between items-start mb-2">
-                                <div>
-                                    <h3 class="font-bold text-lg">${plant.nickname || plant.species}</h3>
-                                    ${plant.nickname ? `<p class="text-sm text-gray-600">${plant.species}</p>` : ''}
-                                </div>
-                                <span class="${
-                                    plant.status === 'Due' ? 'bg-red-500' :
-                                    plant.status === 'Needs Check' ? 'bg-yellow-500' :
-                                    'bg-green-500'
-                                } text-white px-2 py-1 rounded-full text-xs">
-                                    ${plant.status}
+                </div>
+            </div>
+            
+            <!-- Plant Limit Warning -->
+            ${APP.plants.length >= 45 ? `
+                <div class="mx-4 mt-4 p-3 bg-yellow-100 border border-yellow-300 rounded-lg">
+                    <p class="text-sm text-yellow-800">
+                        ⚠️ ${APP.plants.length}/50 plants (${50 - APP.plants.length} remaining)
+                    </p>
+                </div>
+            ` : ''}
+            
+            <!-- Plants by Room (collapsible) -->
+            <div class="p-4 space-y-4">
+                ${APP.rooms.map(room => {
+                    const roomPlants = plantsByRoom[room.id] || [];
+                    const isCollapsed = APP.collapsedRooms.has(room.id);
+                    
+                    return `
+                        <div class="bg-white rounded-lg shadow-sm overflow-hidden">
+                            <button 
+                                onclick="toggleRoom(${room.id})"
+                                class="w-full p-4 flex justify-between items-center hover:bg-gray-50"
+                            >
+                                <h2 class="font-semibold text-lg">${room.name}</h2>
+                                <span class="text-sm text-gray-500">
+                                    ${roomPlants.length} plants
+                                    <span class="ml-2">${isCollapsed ? '▼' : '▲'}</span>
                                 </span>
-                            </div>
-                            <p class="text-sm text-gray-600 mb-3">
-                                Room: ${rooms.find(r => r.id === plant.roomId)?.name || 'Unknown'} | 
-                                Light: ${plant.lightLevel} | 
-                                Every ${plant.waterIntervalDays} days
-                            </p>
-                            <p class="text-sm text-gray-500 mb-3">
-                                Last watered: ${plant.daysSince === 'Never' ? 'Never' : plant.daysSince + ' days ago'}
-                            </p>
-                            <div class="flex gap-2">
-                                <button onclick="waterPlant(${plant.id})" 
-                                        class="flex-1 px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm">
-                                    💧 Water
-                                </button>
-                                <button onclick="showPlantDetails(${plant.id})" 
-                                        class="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300 text-sm">
-                                    Details
-                                </button>
+                            </button>
+                            
+                            <div class="room-section ${isCollapsed ? 'collapsed' : 'expanded'}">
+                                <div class="p-4 pt-0 space-y-3">
+                                    ${roomPlants.length === 0 ? `
+                                        <p class="text-center text-gray-400 py-4">No plants in this room</p>
+                                    ` : roomPlants.map(plant => renderPlantCard(plant)).join('')}
+                                </div>
                             </div>
                         </div>
-                    `).join('')}
-                </div>
-
-                <!-- Footer -->
-                <div class="mt-8 text-center text-sm text-gray-500">
-                    <button onclick="loadData().then(showDashboard)" class="text-blue-500 hover:underline">Refresh</button>
-                    <span class="mx-2">|</span>
-                    <button onclick="localStorage.clear(); location.reload()" class="text-gray-500 hover:underline">Change Role</button>
-                    <span class="mx-2">|</span>
-                    <button onclick="exportData()" class="text-gray-500 hover:underline">Export Data</button>
-                </div>
+                    `;
+                }).join('')}
             </div>
+            
+            <!-- Add Plant FAB (only if under limit) -->
+            ${APP.plants.length < 50 ? `
+                <button 
+                    onclick="showAddPlantForm()"
+                    class="fixed bottom-24 right-6 w-14 h-14 bg-green-600 text-white rounded-full shadow-lg hover:bg-green-700 flex items-center justify-center"
+                    aria-label="Add new plant"
+                >
+                    <span class="text-2xl">+</span>
+                </button>
+            ` : ''}
+            
+            <!-- Bottom Navigation -->
+            <nav class="fixed bottom-0 left-0 right-0 bg-white border-t" role="navigation">
+                <div class="grid grid-cols-3">
+                    <button 
+                        onclick="showRooms()"
+                        class="py-4 text-center hover:bg-gray-50"
+                        aria-label="Manage rooms"
+                    >
+                        <div>🏠</div>
+                        <div class="text-xs">Rooms</div>
+                    </button>
+                    <button 
+                        onclick="showExport()"
+                        class="py-4 text-center hover:bg-gray-50"
+                        aria-label="Export data"
+                    >
+                        <div>📊</div>
+                        <div class="text-xs">Export</div>
+                    </button>
+                    <button 
+                        onclick="showSettings()"
+                        class="py-4 text-center hover:bg-gray-50"
+                        aria-label="Settings"
+                    >
+                        <div>⚙️</div>
+                        <div class="text-xs">Settings</div>
+                    </button>
+                </div>
+            </nav>
         `;
     }
 
-    // Set status filter
-    function setStatusFilter(status) {
-        filters.status = filters.status === status ? null : status;
-        showDashboard();
-    }
-
-    // Show add plant form
-    function showAddPlantForm() {
-        document.getElementById('app').innerHTML = `
-            <div class="max-w-md mx-auto mt-10 p-6 bg-white rounded-lg shadow">
-                <h2 class="text-xl font-bold mb-4">Add New Plant</h2>
-                <form onsubmit="event.preventDefault(); addPlant()">
-                    <input type="text" id="species" placeholder="Species" required class="w-full p-2 border rounded mb-3">
-                    <input type="text" id="nickname" placeholder="Nickname (optional)" class="w-full p-2 border rounded mb-3">
-                    <select id="roomId" required class="w-full p-2 border rounded mb-3">
-                        ${rooms.map(r => `<option value="${r.id}">${r.name}</option>`).join('')}
-                    </select>
-                    <select id="lightLevel" required class="w-full p-2 border rounded mb-3">
-                        <option value="low">Low Light</option>
-                        <option value="medium">Medium Light</option>
-                        <option value="bright">Bright Light</option>
-                        <option value="direct">Direct Sun</option>
-                    </select>
-                    <input type="number" id="waterIntervalDays" placeholder="Water every X days" value="7" min="1" max="60" required class="w-full p-2 border rounded mb-3">
-                    <div class="flex gap-2">
-                        <button type="submit" class="flex-1 p-2 bg-green-500 text-white rounded hover:bg-green-600">Add Plant</button>
-                        <button type="button" onclick="showDashboard()" class="flex-1 p-2 bg-gray-300 rounded hover:bg-gray-400">Cancel</button>
+    function renderPlantCard(plant) {
+        const statusColors = {
+            'Due': 'bg-red-500',
+            'Needs Check': 'bg-yellow-500', 
+            'Snoozed': 'bg-blue-500',
+            'OK': 'bg-green-500'
+        };
+        
+        const lightIcons = {
+            'low': '☁️',
+            'medium': '⛅',
+            'bright': '☀️',
+            'direct': '🌞'
+        };
+        
+        return `
+            <div 
+                class="bg-gray-50 rounded-lg p-4 cursor-pointer hover:shadow-md transition-shadow"
+                onclick="showQuickPanel(${plant.id})"
+                role="button"
+                tabindex="0"
+                aria-label="${plant.nickname || plant.species} - ${plant.statusInfo.status}"
+            >
+                <div class="flex justify-between items-start mb-2">
+                    <div>
+                        <h3 class="font-semibold">${plant.nickname || plant.species}</h3>
+                        ${plant.nickname ? `<p class="text-sm text-gray-600">${plant.species}</p>` : ''}
                     </div>
-                </form>
+                    <span class="${statusColors[plant.statusInfo.status]} text-white px-2 py-1 rounded-full text-xs font-medium">
+                        ${plant.statusInfo.status}
+                    </span>
+                </div>
+                
+                <div class="flex gap-4 text-sm text-gray-600">
+                    <span>${lightIcons[plant.lightLevel]} ${plant.lightLevel}</span>
+                    <span>💧 ${plant.statusInfo.daysSinceWater ? plant.statusInfo.daysSinceWater + 'd ago' : 'Never'}</span>
+                    <span>📅 Every ${plant.waterIntervalDays}d</span>
+                </div>
+                
+                ${plant.statusInfo.snoozedUntil ? `
+                    <div class="mt-2 text-xs text-blue-600">
+                        ⏰ Snoozed until ${new Date(plant.statusInfo.snoozedUntil).toLocaleDateString()}
+                    </div>
+                ` : ''}
             </div>
         `;
     }
 
-    // Add plant
+    function showQuickPanel(plantId) {
+        const plant = APP.plants.find(p => p.id === plantId);
+        if (!plant) return;
+        
+        const statusInfo = calculatePlantStatus(plant, APP.careEvents);
+        const adaptiveInterval = calculateAdaptiveInterval(plantId) || plant.waterIntervalDays;
+        
+        document.getElementById('quickPanel').innerHTML = `
+            <div class="fixed inset-0 bg-black bg-opacity-50 z-40" onclick="closeQuickPanel()"></div>
+            <div class="slide-panel bg-white rounded-t-2xl shadow-xl p-6 overflow-y-auto">
+                <div class="flex justify-between items-start mb-4">
+                    <div>
+                        <h2 class="text-xl font-bold">${plant.nickname || plant.species}</h2>
+                        ${plant.nickname ? `<p class="text-gray-600">${plant.species}</p>` : ''}
+                    </div>
+                    <button onclick="closeQuickPanel()" class="p-2 hover:bg-gray-100 rounded-lg">✕</button>
+                </div>
+                
+                <!-- Core fields display -->
+                <div class="bg-gray-50 rounded-lg p-3 mb-4">
+                    <div class="grid grid-cols-2 gap-2 text-sm">
+                        <div>
+                            <span class="text-gray-600">Last watered:</span>
+                            <p class="font-medium">${plant.lastWateredAt ? new Date(plant.lastWateredAt).toLocaleDateString() : 'Never'}</p>
+                        </div>
+                        <div>
+                            <span class="text-gray-600">Last fertilized:</span>
+                            <p class="font-medium">${plant.lastFertilizedAt ? new Date(plant.lastFertilizedAt).toLocaleDateString() : 'Never'}</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Moisture dropdown -->
+                <div class="mb-4">
+                    <label class="block text-sm font-medium mb-1">Soil Moisture</label>
+                    <select id="moisture" class="w-full p-2 border rounded-lg">
+                        <option value="Fully Dry">Fully Dry</option>
+                        <option value="Top Dry">Top Dry</option>
+                        <option value="Moist" selected>Moist</option>
+                        <option value="Wet">Wet</option>
+                    </select>
+                </div>
+                
+                <!-- Watered toggle -->
+                <div class="mb-4">
+                    <label class="flex items-center p-3 bg-blue-50 rounded-lg cursor-pointer">
+                        <input type="checkbox" id="watered" class="mr-3" onchange="toggleWateredOptions()">
+                        <span class="font-medium">Watered?</span>
+                    </label>
+                </div>
+                
+                <!-- Interval picker (shown if watered) -->
+                <div id="intervalSection" class="hidden mb-4">
+                    <label class="block text-sm font-medium mb-2">Next water in (days)</label>
+                    <div class="flex gap-2 mb-2">
+                        ${[3, 5, 7, 10, 14].map(d => `
+                            <button 
+                                onclick="setInterval(${d})"
+                                class="px-3 py-1 border rounded-lg hover:bg-gray-50 ${d === adaptiveInterval ? 'bg-blue-100 border-blue-500' : ''}"
+                            >
+                                ${d}
+                            </button>
+                        `).join('')}
+                    </div>
+                    <input type="number" id="interval" value="${adaptiveInterval}" min="1" max="60" class="w-full p-2 border rounded-lg">
+                    ${adaptiveInterval !== plant.waterIntervalDays ? `
+                        <p class="text-xs text-blue-600 mt-1">Adaptive default: ${adaptiveInterval} days (based on last 5 cycles)</p>
+                    ` : ''}
+                </div>
+                
+                <!-- Snooze options (shown if not watered) -->
+                <div id="snoozeSection" class="mb-4">
+                    <label class="block text-sm font-medium mb-2">Snooze</label>
+                    <div class="flex gap-2">
+                        <button onclick="setSnooze(1)" class="px-3 py-1 border rounded-lg hover:bg-gray-50">1 day</button>
+                        <button onclick="setSnooze(2)" class="px-3 py-1 border rounded-lg hover:bg-gray-50">2 days</button>
+                        <input type="number" id="snoozeDays" placeholder="Custom" min="0" max="14" class="flex-1 p-1 border rounded-lg">
+                    </div>
+                </div>
+                
+                <!-- Add note -->
+                <div class="mb-4">
+                    <label class="block text-sm font-medium mb-1">Add note (optional)</label>
+                    <textarea id="note" rows="2" class="w-full p-2 border rounded-lg" placeholder="Any observations..."></textarea>
+                </div>
+                
+                <!-- Save button -->
+                <button 
+                    onclick="saveQuickPanel(${plant.id})"
+                    class="w-full p-3 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium"
+                >
+                    Save
+                </button>
+                
+                <!-- Plant details link -->
+                <button 
+                    onclick="showPlantDetails(${plant.id})"
+                    class="w-full mt-2 p-2 text-gray-600 hover:text-gray-900"
+                >
+                    View Details & History →
+                </button>
+            </div>
+        `;
+    }
+
+    // =====================================
+    // ACTIONS
+    // =====================================
+
+    async function selectRole(role) {
+        APP.role = role;
+        localStorage.setItem('role', role);
+        await loadData();
+        renderApp();
+    }
+
+    function toggleFilter(type, value) {
+        APP.filters[type] = APP.filters[type] === value ? null : value;
+        renderApp();
+    }
+
+    function setFilter(type, value) {
+        APP.filters[type] = value || null;
+        renderApp();
+    }
+
+    function toggleRoom(roomId) {
+        if (APP.collapsedRooms.has(roomId)) {
+            APP.collapsedRooms.delete(roomId);
+        } else {
+            APP.collapsedRooms.add(roomId);
+        }
+        renderApp();
+    }
+
+    function toggleWateredOptions() {
+        const watered = document.getElementById('watered').checked;
+        document.getElementById('intervalSection').classList.toggle('hidden', !watered);
+        document.getElementById('snoozeSection').classList.toggle('hidden', watered);
+    }
+
+    function setInterval(days) {
+        document.getElementById('interval').value = days;
+    }
+
+    function setSnooze(days) {
+        document.getElementById('snoozeDays').value = days;
+    }
+
+    function closeQuickPanel() {
+        document.getElementById('quickPanel').innerHTML = '';
+    }
+
+    async function saveQuickPanel(plantId) {
+        const plant = APP.plants.find(p => p.id === plantId);
+        const watered = document.getElementById('watered').checked;
+        const moisture = document.getElementById('moisture').value;
+        const note = document.getElementById('note').value;
+        
+        try {
+            if (watered) {
+                const interval = parseInt(document.getElementById('interval').value);
+                
+                // Record water event
+                await fetch('/api/care-events', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        plantId,
+                        role: APP.role,
+                        type: 'water',
+                        soilMoisture: moisture,
+                        intervalDaysChosen: interval,
+                        note
+                    })
+                });
+                
+                // Update adaptive interval
+                if (plant.lastWateredAt) {
+                    const daysSince = Math.floor((new Date() - new Date(plant.lastWateredAt)) / 86400000);
+                    updateAdaptiveInterval(plantId, daysSince);
+                }
+                
+                // Update plant
+                await fetch(`/api/plants/${plantId}/water`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ performedBy: APP.role })
+                });
+                
+                showToast('Plant watered!', 'success');
+            } else {
+                // Record check event
+                await fetch('/api/care-events', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        plantId,
+                        role: APP.role,
+                        type: 'check',
+                        soilMoisture: moisture,
+                        note
+                    })
+                });
+                
+                // Handle snooze if set
+                const snoozeDays = document.getElementById('snoozeDays').value;
+                if (snoozeDays) {
+                    await fetch('/api/care-events', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            plantId,
+                            role: APP.role,
+                            type: 'snooze',
+                            snoozeDays: parseInt(snoozeDays),
+                            note: `Snoozed for ${snoozeDays} days`
+                        })
+                    });
+                    showToast(`Snoozed for ${snoozeDays} days`, 'info');
+                }
+            }
+            
+            closeQuickPanel();
+            await loadData();
+            renderApp();
+        } catch (error) {
+            showToast('Error saving', 'error');
+        }
+    }
+
+    function showAddPlantForm() {
+        document.getElementById('quickPanel').innerHTML = `
+            <div class="fixed inset-0 bg-black bg-opacity-50 z-40" onclick="closeQuickPanel()"></div>
+            <div class="slide-panel bg-white rounded-t-2xl shadow-xl p-6 overflow-y-auto">
+                <h2 class="text-xl font-bold mb-4">Add New Plant</h2>
+                
+                <form onsubmit="event.preventDefault(); addPlant()">
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium mb-1">Species *</label>
+                        <input type="text" id="newSpecies" required class="w-full p-2 border rounded-lg" placeholder="e.g., Monstera">
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium mb-1">Nickname</label>
+                        <input type="text" id="newNickname" class="w-full p-2 border rounded-lg" placeholder="Optional">
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium mb-1">Room *</label>
+                        <select id="newRoomId" required class="w-full p-2 border rounded-lg">
+                            ${APP.rooms.map(r => `<option value="${r.id}">${r.name}</option>`).join('')}
+                        </select>
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium mb-1">Light Level *</label>
+                        <select id="newLightLevel" required class="w-full p-2 border rounded-lg">
+                            <option value="low">☁️ Low</option>
+                            <option value="medium">⛅ Medium</option>
+                            <option value="bright">☀️ Bright</option>
+                            <option value="direct">🌞 Direct</option>
+                        </select>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-4 mb-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-1">Water Every (days) *</label>
+                            <input type="number" id="newWaterInterval" required value="7" min="1" max="60" class="w-full p-2 border rounded-lg">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">Fertilize Every (days) *</label>
+                            <input type="number" id="newFertilizeInterval" required value="30" min="7" max="120" class="w-full p-2 border rounded-lg">
+                        </div>
+                    </div>
+                    
+                    <button type="submit" class="w-full p-3 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium">
+                        Add Plant
+                    </button>
+                </form>
+                
+                <button onclick="closeQuickPanel()" class="w-full mt-2 p-2 text-gray-600 hover:text-gray-900">
+                    Cancel
+                </button>
+            </div>
+        `;
+    }
+
     async function addPlant() {
         const plantData = {
-            species: document.getElementById('species').value,
-            nickname: document.getElementById('nickname').value,
-            roomId: parseInt(document.getElementById('roomId').value),
-            lightLevel: document.getElementById('lightLevel').value,
-            waterIntervalDays: parseInt(document.getElementById('waterIntervalDays').value),
-            fertilizeIntervalDays: 30,
-            addedBy: currentRole
+            species: document.getElementById('newSpecies').value,
+            nickname: document.getElementById('newNickname').value || null,
+            roomId: parseInt(document.getElementById('newRoomId').value),
+            lightLevel: document.getElementById('newLightLevel').value,
+            waterIntervalDays: parseInt(document.getElementById('newWaterInterval').value),
+            fertilizeIntervalDays: parseInt(document.getElementById('newFertilizeInterval').value),
+            addedBy: APP.role
         };
         
         try {
-            await fetch(API_BASE + '/plants', {
+            const response = await fetch('/api/plants', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(plantData)
             });
+            
+            if (!response.ok) {
+                const error = await response.text();
+                if (error.includes('50')) {
+                    showToast('Maximum 50 plants reached!', 'error');
+                } else {
+                    throw new Error(error);
+                }
+                return;
+            }
+            
+            showToast('Plant added successfully!', 'success');
+            closeQuickPanel();
             await loadData();
-            showDashboard();
+            renderApp();
         } catch (error) {
-            alert('Error adding plant: ' + error.message);
+            showToast('Error adding plant', 'error');
         }
     }
 
-    // Water plant
-    async function waterPlant(plantId) {
+    function showPlantDetails(plantId) {
+        const plant = APP.plants.find(p => p.id === plantId);
+        const events = APP.careEvents.filter(e => e.plantId === plantId)
+            .sort((a, b) => new Date(b.performedAt) - new Date(a.performedAt));
+        
+        document.getElementById('quickPanel').innerHTML = `
+            <div class="fixed inset-0 bg-black bg-opacity-50 z-40" onclick="closeQuickPanel()"></div>
+            <div class="slide-panel bg-white rounded-t-2xl shadow-xl p-6 overflow-y-auto">
+                <div class="flex justify-between items-start mb-4">
+                    <div>
+                        <h2 class="text-xl font-bold">${plant.nickname || plant.species}</h2>
+                        ${plant.nickname ? `<p class="text-gray-600">${plant.species}</p>` : ''}
+                    </div>
+                    <button onclick="closeQuickPanel()" class="p-2 hover:bg-gray-100 rounded-lg">✕</button>
+                </div>
+                
+                <!-- Plant Info -->
+                <div class="grid grid-cols-2 gap-3 mb-4 text-sm">
+                    <div class="bg-gray-50 p-2 rounded">
+                        <span class="text-gray-600">Room:</span>
+                        <p class="font-medium">${APP.rooms.find(r => r.id == plant.roomId)?.name}</p>
+                    </div>
+                    <div class="bg-gray-50 p-2 rounded">
+                        <span class="text-gray-600">Light:</span>
+                        <p class="font-medium">${plant.lightLevel}</p>
+                    </div>
+                    <div class="bg-gray-50 p-2 rounded">
+                        <span class="text-gray-600">Water Interval:</span>
+                        <p class="font-medium">${plant.waterIntervalDays} days</p>
+                    </div>
+                    <div class="bg-gray-50 p-2 rounded">
+                        <span class="text-gray-600">Fertilize Interval:</span>
+                        <p class="font-medium">${plant.fertilizeIntervalDays} days</p>
+                    </div>
+                </div>
+                
+                <!-- Seasonal Pause -->
+                <div class="mb-4">
+                    <h3 class="font-medium mb-2">Fertilizing Seasonal Pause</h3>
+                    <div class="flex gap-2">
+                        <input type="date" id="pauseStart" value="${plant.fertilizeSeasonalPauseStart || ''}" class="flex-1 p-2 border rounded">
+                        <input type="date" id="pauseEnd" value="${plant.fertilizeSeasonalPauseEnd || ''}" class="flex-1 p-2 border rounded">
+                    </div>
+                    <button onclick="updateSeasonalPause(${plant.id})" class="mt-2 px-3 py-1 bg-blue-500 text-white rounded text-sm">
+                        Update Pause Dates
+                    </button>
+                </div>
+                
+                <!-- Timeline of Care Events -->
+                <h3 class="font-medium mb-2">Care History</h3>
+                <div class="space-y-2 max-h-60 overflow-y-auto">
+                    ${events.length === 0 ? '<p class="text-gray-500">No history yet</p>' : 
+                    events.map(event => `
+                        <div class="border-l-2 border-gray-300 pl-3 pb-2">
+                            <div class="flex items-center gap-2">
+                                <span class="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center text-xs font-medium">
+                                    ${event.role ? event.role[0] : event.performedBy[0]}
+                                </span>
+                                <div class="flex-1">
+                                    <p class="text-sm">
+                                        <strong>${event.role || event.performedBy}</strong>
+                                        ${event.type === 'water' ? '💧 watered' : 
+                                          event.type === 'fertilize' ? '🌿 fertilized' :
+                                          event.type === 'check' ? '👁️ checked' :
+                                          event.type === 'snooze' ? '⏰ snoozed' :
+                                          event.type === 'note' ? '📝 noted' : event.type}
+                                    </p>
+                                    <p class="text-xs text-gray-500">
+                                        ${new Date(event.performedAt || event.at).toLocaleString()}
+                                    </p>
+                                    ${event.soilMoisture ? `<p class="text-xs">Moisture: ${event.soilMoisture}</p>` : ''}
+                                    ${event.note ? `<p class="text-xs italic">"${event.note}"</p>` : ''}
+                                </div>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+                
+                <!-- Delete Button -->
+                <button 
+                    onclick="if(confirm('Delete this plant?')) deletePlant(${plant.id})"
+                    class="w-full mt-4 p-2 bg-red-500 text-white rounded-lg hover:bg-red-600"
+                >
+                    Delete Plant
+                </button>
+            </div>
+        `;
+    }
+
+    async function updateSeasonalPause(plantId) {
+        const start = document.getElementById('pauseStart').value;
+        const end = document.getElementById('pauseEnd').value;
+        
         try {
-            await fetch(API_BASE + '/plants/' + plantId + '/water', {
+            await fetch(`/api/plants/${plantId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    fertilizeSeasonalPauseStart: start || null,
+                    fertilizeSeasonalPauseEnd: end || null
+                })
+            });
+            showToast('Seasonal pause updated', 'success');
+            await loadData();
+        } catch (error) {
+            showToast('Error updating pause', 'error');
+        }
+    }
+
+    async function deletePlant(plantId) {
+        try {
+            await fetch(`/api/plants/${plantId}`, { method: 'DELETE' });
+            showToast('Plant deleted', 'success');
+            closeQuickPanel();
+            await loadData();
+            renderApp();
+        } catch (error) {
+            showToast('Error deleting plant', 'error');
+        }
+    }
+
+    function showRooms() {
+        document.getElementById('quickPanel').innerHTML = `
+            <div class="fixed inset-0 bg-black bg-opacity-50 z-40" onclick="closeQuickPanel()"></div>
+            <div class="slide-panel bg-white rounded-t-2xl shadow-xl p-6 overflow-y-auto">
+                <h2 class="text-xl font-bold mb-4">Rooms</h2>
+                
+                <div class="space-y-2 mb-4">
+                    ${APP.rooms.map(room => {
+                        const plantCount = APP.plants.filter(p => p.roomId == room.id).length;
+                        return `
+                            <div class="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
+                                <div>
+                                    <p class="font-medium">${room.name}</p>
+                                    <p class="text-sm text-gray-600">${plantCount} plants</p>
+                                </div>
+                                <span class="text-sm text-gray-500">#${room.orderIndex}</span>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+                
+                <div class="border-t pt-4">
+                    <h3 class="font-medium mb-2">Add New Room</h3>
+                    <form onsubmit="event.preventDefault(); addRoom()">
+                        <div class="flex gap-2">
+                            <input type="text" id="newRoomName" required placeholder="Room name" class="flex-1 p-2 border rounded-lg">
+                            <button type="submit" class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                                Add
+                            </button>
+                        </div>
+                    </form>
+                </div>
+                
+                <button onclick="closeQuickPanel()" class="w-full mt-4 p-2 text-gray-600 hover:text-gray-900">
+                    Close
+                </button>
+            </div>
+        `;
+    }
+
+    async function addRoom() {
+        const name = document.getElementById('newRoomName').value;
+        if (!name) return;
+        
+        try {
+            await fetch('/api/rooms', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ performedBy: currentRole })
+                body: JSON.stringify({
+                    name,
+                    orderIndex: APP.rooms.length + 1
+                })
             });
+            showToast('Room added', 'success');
             await loadData();
-            showDashboard();
-            alert('Plant watered successfully!');
+            showRooms();
         } catch (error) {
-            alert('Error watering plant: ' + error.message);
+            showToast('Error adding room', 'error');
         }
     }
 
-    // Show plant details
-    async function showPlantDetails(plantId) {
-        const plant = plants.find(p => p.id === plantId);
-        const eventsRes = await fetch(API_BASE + '/plants/' + plantId + '/events');
-        const events = await eventsRes.json();
-        
-        const historyHtml = events.length > 0 ? events.map(e => `
-            <div class="border-l-2 pl-2 mb-2">
-                <p class="text-sm"><b>${e.performedBy}</b> - ${e.eventType}</p>
-                <p class="text-xs text-gray-500">${new Date(e.performedAt).toLocaleString()}</p>
+    function showExport() {
+        document.getElementById('quickPanel').innerHTML = `
+            <div class="fixed inset-0 bg-black bg-opacity-50 z-40" onclick="closeQuickPanel()"></div>
+            <div class="slide-panel bg-white rounded-t-2xl shadow-xl p-6">
+                <h2 class="text-xl font-bold mb-4">Export Data</h2>
+                
+                <p class="text-gray-600 mb-4">Export your plant data in CSV format (as specified):</p>
+                
+                <button onclick="exportCSV()" class="w-full p-3 bg-green-600 text-white rounded-lg hover:bg-green-700 mb-2">
+                    📊 Export as CSV (Zip)
+                </button>
+                
+                <button onclick="exportJSON()" class="w-full p-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                    📄 Export as JSON
+                </button>
+                
+                <button onclick="closeQuickPanel()" class="w-full mt-4 p-2 text-gray-600 hover:text-gray-900">
+                    Close
+                </button>
             </div>
-        `).join('') : '<p class="text-gray-500">No history yet</p>';
+        `;
+    }
+
+    function exportCSV() {
+        // Create plants.csv
+        const plantsCSV = [
+            'plantId,roomName,species,nickname,lightLevel,lastWateredAt,lastFertilizedAt,lastRepottedAt,defaultWaterIntervalDays,defaultFertilizeIntervalDays,fertilizePauseStart,fertilizePauseEnd,createdAt,updatedAt',
+            ...APP.plants.map(p => {
+                const room = APP.rooms.find(r => r.id == p.roomId);
+                return [
+                    p.id,
+                    room?.name || '',
+                    p.species,
+                    p.nickname || '',
+                    p.lightLevel,
+                    p.lastWateredAt || '',
+                    p.lastFertilizedAt || '',
+                    p.lastRepottedAt || '',
+                    p.waterIntervalDays,
+                    p.fertilizeIntervalDays,
+                    p.fertilizeSeasonalPauseStart || '',
+                    p.fertilizeSeasonalPauseEnd || '',
+                    p.createdAt || '',
+                    p.updatedAt || ''
+                ].join(',');
+            })
+        ].join('\n');
         
-        document.getElementById('app').innerHTML = `
-            <div class="max-w-md mx-auto mt-10 p-6 bg-white rounded-lg shadow">
-                <h2 class="text-xl font-bold mb-4">${plant.nickname || plant.species}</h2>
-                <div class="mb-4">
-                    <p><b>Species:</b> ${plant.species}</p>
-                    <p><b>Room:</b> ${rooms.find(r => r.id === plant.roomId)?.name}</p>
-                    <p><b>Light:</b> ${plant.lightLevel}</p>
-                    <p><b>Water Interval:</b> ${plant.waterIntervalDays} days</p>
-                    <p><b>Added by:</b> ${plant.addedBy}</p>
-                </div>
-                <h3 class="font-bold mb-2">Care History</h3>
-                <div class="max-h-60 overflow-y-auto mb-4">${historyHtml}</div>
-                <div class="flex gap-2">
-                    <button onclick="showDashboard()" class="flex-1 p-2 bg-gray-300 rounded hover:bg-gray-400">Back</button>
-                    <button onclick="deletePlant(${plant.id})" class="flex-1 p-2 bg-red-500 text-white rounded hover:bg-red-600">Delete</button>
+        // Create care_events.csv
+        const eventsCSV = [
+            'eventId,plantId,role,type,at,soilMoisture,intervalDaysChosen,snoozeDays,note',
+            ...APP.careEvents.map(e => [
+                e.id,
+                e.plantId,
+                e.role || e.performedBy,
+                e.type || e.eventType,
+                e.at || e.performedAt,
+                e.soilMoisture || '',
+                e.intervalDaysChosen || '',
+                e.snoozeDays || '',
+                e.note ? `"${e.note.replace(/"/g, '""')}"` : ''
+            ].join(','))
+        ].join('\n');
+        
+        // For now, download as separate files (zip would require library)
+        const plantsBlob = new Blob([plantsCSV], { type: 'text/csv' });
+        const eventsBlob = new Blob([eventsCSV], { type: 'text/csv' });
+        
+        const date = new Date().toISOString().split('T')[0];
+        
+        // Download plants.csv
+        const a1 = document.createElement('a');
+        a1.href = URL.createObjectURL(plantsBlob);
+        a1.download = `plants-${date}.csv`;
+        a1.click();
+        
+        // Download care_events.csv
+        setTimeout(() => {
+            const a2 = document.createElement('a');
+            a2.href = URL.createObjectURL(eventsBlob);
+            a2.download = `care_events-${date}.csv`;
+            a2.click();
+        }, 500);
+        
+        showToast('CSV files exported', 'success');
+    }
+
+    function exportJSON() {
+        const data = {
+            exportDate: new Date().toISOString(),
+            plants: APP.plants,
+            rooms: APP.rooms,
+            careEvents: APP.careEvents,
+            currentRole: APP.role
+        };
+        
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `plant-tracker-${new Date().toISOString().split('T')[0]}.json`;
+        a.click();
+        
+        showToast('JSON exported', 'success');
+    }
+
+    function showSettings() {
+        document.getElementById('quickPanel').innerHTML = `
+            <div class="fixed inset-0 bg-black bg-opacity-50 z-40" onclick="closeQuickPanel()"></div>
+            <div class="slide-panel bg-white rounded-t-2xl shadow-xl p-6">
+                <h2 class="text-xl font-bold mb-4">Settings</h2>
+                
+                <div class="space-y-4">
+                    <div class="bg-gray-50 p-4 rounded-lg">
+                        <p class="text-sm text-gray-600">Current Role</p>
+                        <p class="text-lg font-medium">${APP.role}</p>
+                        <p class="text-xs text-gray-500 mt-1">Role identifies who performs actions</p>
+                    </div>
+                    
+                    <button 
+                        onclick="if(confirm('Change role? This will refresh the app.')) changeRole()"
+                        class="w-full p-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                    >
+                        Change Role
+                    </button>
+                    
+                    <div class="border-t pt-4">
+                        <h3 class="font-medium mb-2">Statistics</h3>
+                        <div class="grid grid-cols-2 gap-2 text-sm">
+                            <div class="bg-gray-50 p-2 rounded">
+                                <p class="text-gray-600">Total Plants</p>
+                                <p class="font-medium">${APP.plants.length}/50</p>
+                            </div>
+                            <div class="bg-gray-50 p-2 rounded">
+                                <p class="text-gray-600">Total Rooms</p>
+                                <p class="font-medium">${APP.rooms.length}</p>
+                            </div>
+                            <div class="bg-gray-50 p-2 rounded">
+                                <p class="text-gray-600">Need Water</p>
+                                <p class="font-medium text-red-600">
+                                    ${APP.plants.filter(p => calculatePlantStatus(p).status === 'Due').length}
+                                </p>
+                            </div>
+                            <div class="bg-gray-50 p-2 rounded">
+                                <p class="text-gray-600">Care Events</p>
+                                <p class="font-medium">${APP.careEvents.length}</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <button onclick="closeQuickPanel()" class="w-full p-2 text-gray-600 hover:text-gray-900">
+                        Close
+                    </button>
                 </div>
             </div>
         `;
     }
 
-    // Delete plant
-    async function deletePlant(plantId) {
-        if (!confirm('Delete this plant?')) return;
-        
+    function changeRole() {
+        localStorage.removeItem('role');
+        APP.role = null;
+        closeQuickPanel();
+        renderApp();
+    }
+
+    // =====================================
+    // DATA LOADING
+    // =====================================
+
+    async function loadData() {
         try {
-            await fetch(API_BASE + '/plants/' + plantId, { method: 'DELETE' });
-            await loadData();
-            showDashboard();
+            const [rooms, plants, events] = await Promise.all([
+                fetch('/api/rooms').then(r => r.json()),
+                fetch('/api/plants').then(r => r.json()),
+                fetch('/api/care-events').then(r => r.json()).catch(() => [])
+            ]);
+            
+            APP.rooms = rooms || [];
+            APP.plants = plants || [];
+            APP.careEvents = events || [];
+            
+            // Load adaptive intervals from localStorage
+            const stored = localStorage.getItem('adaptiveIntervals');
+            if (stored) {
+                APP.adaptiveIntervals = JSON.parse(stored);
+            }
+            
         } catch (error) {
-            alert('Error deleting plant: ' + error.message);
+            console.error('Error loading data:', error);
+            showToast('Error loading data', 'error');
         }
     }
 
-    // Export data
-    function exportData() {
-        const data = {
-            exportDate: new Date().toISOString(),
-            plants: plants,
-            rooms: rooms
-        };
+    // =====================================
+    // INITIALIZATION
+    // =====================================
+
+    async function init() {
+        // Register service worker for PWA
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(e => console.log('SW registration failed'));
+        }
         
-        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'plant-tracker-export.json';
-        a.click();
+        if (APP.role) {
+            await loadData();
+        }
+        renderApp();
+        
+        // Auto-refresh every 30 seconds (per spec: not real-time but periodic)
+        setInterval(() => {
+            if (APP.role) loadData().then(renderApp);
+        }, 30000);
     }
 
     // Start app
