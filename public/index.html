@@ -205,13 +205,26 @@
 
     function formatLocalDateTime(dateStr) {
         if (!dateStr) return 'Never';
-        const date = new Date(dateStr);
+        
+        // Handle both ISO strings and database datetime format
+        let date;
+        if (dateStr.includes('T')) {
+            // ISO format
+            date = new Date(dateStr);
+        } else {
+            // Database format (YYYY-MM-DD HH:MM:SS) - assume it's UTC
+            date = new Date(dateStr.replace(' ', 'T') + 'Z');
+        }
+        
+        // Return in user's local timezone
         return date.toLocaleString('en-US', { 
             month: 'short', 
-            day: 'numeric', 
+            day: 'numeric',
+            year: 'numeric',
             hour: 'numeric', 
             minute: '2-digit',
-            hour12: true 
+            hour12: true,
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
         });
     }
 
@@ -517,35 +530,68 @@
                     </div>
                 </div>
                 
-                <!-- Quick Actions -->
-                <div class="grid grid-cols-2 gap-2 mb-4">
-                    <button onclick="quickWater(${plant.id})" class="p-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600">
-                        💧 Quick Water
-                    </button>
-                    <button onclick="showEditPlant(${plant.id})" class="p-3 bg-gray-500 text-white rounded-lg hover:bg-gray-600">
-                        ✏️ Edit Details
+                <!-- Advanced Watering Options -->
+                <div class="mb-4 p-3 bg-blue-50 rounded-lg">
+                    <h3 class="font-medium mb-2 text-gray-900">Water Plant</h3>
+                    <div class="grid grid-cols-2 gap-2 mb-2">
+                        <div>
+                            <label class="text-xs text-gray-600">Interval (days)</label>
+                            <input type="number" id="waterInterval" value="${plant.waterIntervalDays}" min="1" max="60" class="w-full p-1 border rounded text-sm">
+                        </div>
+                        <div>
+                            <label class="text-xs text-gray-600">Moisture</label>
+                            <select id="waterMoisture" class="w-full p-1 border rounded text-sm">
+                                <option value="">Select...</option>
+                                <option value="Fully Dry">Fully Dry</option>
+                                <option value="Top Dry">Top Dry</option>
+                                <option value="Moist" selected>Moist</option>
+                                <option value="Wet">Wet</option>
+                            </select>
+                        </div>
+                    </div>
+                    <button onclick="waterWithInterval(${plant.id})" class="w-full p-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600">
+                        💧 Water Now
                     </button>
                 </div>
                 
-                <!-- Moisture and Notes -->
+                <!-- Fertilize Options -->
+                <div class="mb-4 p-3 bg-green-50 rounded-lg">
+                    <h3 class="font-medium mb-2 text-gray-900">Fertilize Plant</h3>
+                    <div class="text-xs text-gray-600 mb-2">
+                        Last: ${plant.lastFertilizedAt ? formatLocalDateTime(plant.lastFertilizedAt) : 'Never'}
+                    </div>
+                    <button onclick="fertilizePlant(${plant.id})" class="w-full p-2 bg-green-500 text-white rounded-lg hover:bg-green-600 mb-2">
+                        🌿 Fertilize Now
+                    </button>
+                    <div class="text-xs text-gray-600 mb-1">Snooze Fertilizing:</div>
+                    <div class="flex gap-2">
+                        ${[7, 14, 30].map(d => `
+                            <button onclick="snoozeFertilizer(${plant.id}, ${d})" class="flex-1 p-1 border rounded text-sm hover:bg-gray-50 text-gray-900">
+                                ${d}d
+                            </button>
+                        `).join('')}
+                    </div>
+                </div>
+                
+                <!-- Check Only -->
                 <div class="mb-4">
-                    <label class="block text-sm font-medium mb-1 text-gray-900">Soil Check</label>
-                    <select id="moisture" class="w-full p-2 border rounded-lg mb-2">
+                    <label class="block text-sm font-medium mb-1 text-gray-900">Record Check Only</label>
+                    <select id="checkMoisture" class="w-full p-2 border rounded-lg mb-2">
                         <option value="">Select moisture...</option>
                         <option value="Fully Dry">Fully Dry</option>
                         <option value="Top Dry">Top Dry</option>
                         <option value="Moist">Moist</option>
                         <option value="Wet">Wet</option>
                     </select>
-                    <input type="text" id="quickNote" placeholder="Add note..." class="w-full p-2 border rounded-lg">
-                    <button onclick="recordCheck(${plant.id})" class="mt-2 w-full p-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                    <input type="text" id="quickNote" placeholder="Add note..." class="w-full p-2 border rounded-lg mb-2">
+                    <button onclick="recordCheck(${plant.id})" class="w-full p-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600">
                         Record Check
                     </button>
                 </div>
                 
-                <!-- Snooze -->
+                <!-- Snooze Watering -->
                 <div class="mb-4">
-                    <label class="block text-sm font-medium mb-2 text-gray-900">Snooze</label>
+                    <label class="block text-sm font-medium mb-2 text-gray-900">Snooze Watering</label>
                     <div class="flex gap-2">
                         ${[1, 2, 3, 5, 7].map(d => `
                             <button onclick="snoozeQuick(${plant.id}, ${d})" class="flex-1 p-2 border rounded-lg hover:bg-gray-50 text-gray-900">
@@ -555,10 +601,15 @@
                     </div>
                 </div>
                 
-                <!-- Details link -->
-                <button onclick="showPlantDetails(${plant.id})" class="w-full p-2 text-gray-600 hover:text-gray-900">
-                    View Full Details & History →
-                </button>
+                <!-- Actions -->
+                <div class="grid grid-cols-2 gap-2">
+                    <button onclick="showEditPlant(${plant.id})" class="p-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600">
+                        ✏️ Edit
+                    </button>
+                    <button onclick="showPlantDetails(${plant.id})" class="p-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600">
+                        📜 History
+                    </button>
+                </div>
             </div>
         `;
     }
@@ -781,6 +832,115 @@
         renderApp();
     }
 
+    async function waterWithInterval(plantId) {
+        const plant = APP.plants.find(p => p.id === plantId);
+        const newInterval = parseInt(document.getElementById('waterInterval').value);
+        const moisture = document.getElementById('waterMoisture').value;
+        
+        try {
+            // Update the plant's water interval if changed
+            if (newInterval !== plant.waterIntervalDays) {
+                await fetch(`/api/plants/${plantId}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ waterIntervalDays: newInterval })
+                }).catch(async () => {
+                    // Fallback to PUT
+                    await fetch(`/api/plants/${plantId}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ...plant, waterIntervalDays: newInterval })
+                    });
+                });
+            }
+            
+            // Record the watering
+            await fetch(`/api/plants/${plantId}/water`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ performedBy: APP.role })
+            });
+            
+            // Record care event with details
+            await fetch('/api/care-events', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    plantId,
+                    role: APP.role,
+                    type: 'water',
+                    eventType: 'water',
+                    soilMoisture: moisture,
+                    intervalDaysChosen: newInterval,
+                    performedBy: APP.role
+                })
+            }).catch(() => {});
+            
+            showToast(`Plant watered! Interval: ${newInterval} days`, 'success');
+            await loadData();
+            closeQuickPanel();
+            renderApp();
+        } catch (error) {
+            showToast('Error watering plant', 'error');
+        }
+    }
+    
+    async function fertilizePlant(plantId) {
+        try {
+            // Update last fertilized date
+            await fetch(`/api/plants/${plantId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ lastFertilizedAt: new Date().toISOString() })
+            }).catch(() => {});
+            
+            // Record care event
+            await fetch('/api/care-events', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    plantId,
+                    role: APP.role,
+                    type: 'fertilize',
+                    eventType: 'fertilize',
+                    performedBy: APP.role
+                })
+            }).catch(() => {});
+            
+            showToast('Plant fertilized!', 'success');
+            await loadData();
+            closeQuickPanel();
+            renderApp();
+        } catch (error) {
+            showToast('Error fertilizing plant', 'error');
+        }
+    }
+    
+    async function snoozeFertilizer(plantId, days) {
+        try {
+            await fetch('/api/care-events', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    plantId,
+                    role: APP.role,
+                    type: 'snooze',
+                    eventType: 'snooze',
+                    snoozeDays: days,
+                    performedBy: APP.role,
+                    notes: `Fertilizing snoozed for ${days} days`
+                })
+            });
+            
+            showToast(`Fertilizing snoozed for ${days} days`, 'info');
+            await loadData();
+            closeQuickPanel();
+            renderApp();
+        } catch (error) {
+            showToast('Error setting snooze', 'error');
+        }
+    }
+
     async function quickWater(plantId) {
         try {
             await fetch(`/api/plants/${plantId}/water`, {
@@ -812,8 +972,8 @@
     }
 
     async function recordCheck(plantId) {
-        const moisture = document.getElementById('moisture').value;
-        const note = document.getElementById('quickNote').value;
+        const moisture = document.getElementById('checkMoisture')?.value || document.getElementById('moisture')?.value;
+        const note = document.getElementById('quickNote')?.value;
         
         if (!moisture) {
             showToast('Please select moisture level', 'warning');
