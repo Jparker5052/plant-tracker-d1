@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <title>Plant Tracker</title>
+    <title>Plant Gays</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="manifest" href="/manifest.json">
     <style>
@@ -26,6 +26,14 @@
         
         .dark-mode .bg-gray-100 {
             background-color: #3a3a3a !important;
+        }
+        
+        .dark-mode .bg-blue-50 {
+            background-color: #1a2332 !important;
+        }
+        
+        .dark-mode .bg-green-50 {
+            background-color: #1a2f1a !important;
         }
         
         .dark-mode .text-gray-900 {
@@ -229,20 +237,39 @@
     }
 
     function formatEventType(event) {
-        switch(event.eventType || event.type) {
+        const eventType = event.eventType || event.type;
+        let description = '';
+        
+        switch(eventType) {
             case 'water': 
-                return `💧 Watered${event.intervalDaysChosen ? ` (${event.intervalDaysChosen}d interval)` : ''}`;
+                description = `💧 Watered`;
+                if (event.intervalDaysChosen) {
+                    description += ` (${event.intervalDaysChosen}d interval)`;
+                }
+                if (event.soilMoisture) {
+                    description += ` - ${event.soilMoisture}`;
+                }
+                break;
             case 'check':
-                return `👁️ Checked${event.soilMoisture ? ` - ${event.soilMoisture}` : ''}`;
+                description = `👁️ Checked`;
+                if (event.soilMoisture) {
+                    description += ` - Soil: ${event.soilMoisture}`;
+                }
+                break;
             case 'snooze':
-                return `⏰ Snoozed for ${event.snoozeDays || '?'} days`;
+                description = `⏰ Snoozed for ${event.snoozeDays || '?'} days`;
+                break;
             case 'fertilize':
-                return '🌿 Fertilized';
+                description = '🌿 Fertilized';
+                break;
             case 'note':
-                return '📝 Note added';
+                description = '📝 Note added';
+                break;
             default:
-                return event.eventType || event.type || 'Unknown action';
+                description = eventType || 'Unknown action';
         }
+        
+        return description;
     }
 
     function showToast(message, type = 'info') {
@@ -716,22 +743,37 @@
                 <h3 class="font-medium mb-2 text-gray-900">Care History</h3>
                 <div class="space-y-2 max-h-60 overflow-y-auto">
                     ${events.length === 0 ? '<p class="text-gray-500">No history yet</p>' : 
-                    events.map(event => `
-                        <div class="border-l-2 border-gray-300 pl-3 pb-2">
-                            <div class="flex items-start gap-2">
-                                <div class="flex-1">
-                                    <p class="text-sm text-gray-900">
-                                        <strong>${event.role || event.performedBy || 'Unknown'}</strong>
-                                        ${formatEventType(event)}
-                                    </p>
-                                    <p class="text-xs text-gray-500">
-                                        ${formatLocalDateTime(event.performedAt || event.at)}
-                                    </p>
-                                    ${event.notes || event.note ? `<p class="text-xs italic text-gray-600 mt-1">"${event.notes || event.note}"</p>` : ''}
+                    events.slice(0, 50).map(event => {
+                        const eventType = event.eventType || event.type || 'unknown';
+                        const isCheckEvent = eventType === 'check';
+                        const hasDetails = event.soilMoisture || event.notes || event.note;
+                        
+                        // Only show events that have meaningful content
+                        if (isCheckEvent && !hasDetails) {
+                            return ''; // Skip check events with no details
+                        }
+                        
+                        return `
+                            <div class="border-l-2 border-gray-300 pl-3 pb-2">
+                                <div class="flex items-start gap-2">
+                                    <div class="flex-1">
+                                        <p class="text-sm text-gray-900">
+                                            <strong>${event.role || event.performedBy || 'Unknown'}</strong>
+                                            ${formatEventType(event)}
+                                        </p>
+                                        <p class="text-xs text-gray-500">
+                                            ${formatLocalDateTime(event.performedAt || event.at)}
+                                        </p>
+                                        ${event.notes || event.note ? `
+                                            <p class="text-xs italic text-gray-600 mt-1 bg-gray-50 p-1 rounded">
+                                                "${event.notes || event.note}"
+                                            </p>
+                                        ` : ''}
+                                    </div>
                                 </div>
                             </div>
-                        </div>
-                    `).join('')}
+                        `;
+                    }).filter(item => item !== '').join('')}
                 </div>
                 
                 <!-- Actions -->
@@ -975,13 +1017,14 @@
         const moisture = document.getElementById('checkMoisture')?.value || document.getElementById('moisture')?.value;
         const note = document.getElementById('quickNote')?.value;
         
-        if (!moisture) {
-            showToast('Please select moisture level', 'warning');
+        if (!moisture && !note) {
+            showToast('Please select moisture level or add a note', 'warning');
             return;
         }
         
         try {
-            await fetch('/api/care-events', {
+            // Always send the care event to be recorded in history
+            const response = await fetch('/api/care-events', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -989,17 +1032,23 @@
                     role: APP.role,
                     type: 'check',
                     eventType: 'check',
-                    soilMoisture: moisture,
-                    notes: note,
-                    performedBy: APP.role
+                    soilMoisture: moisture || null,
+                    notes: note || null,
+                    performedBy: APP.role,
+                    performedAt: new Date().toISOString()
                 })
             });
             
-            showToast('Check recorded', 'success');
+            if (!response.ok) {
+                console.error('Failed to record check:', await response.text());
+            }
+            
+            showToast(`Check recorded${moisture ? ` - ${moisture}` : ''}`, 'success');
             await loadData();
             closeQuickPanel();
             renderApp();
         } catch (error) {
+            console.error('Error recording check:', error);
             showToast('Error recording check', 'error');
         }
     }
