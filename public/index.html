@@ -2,410 +2,1107 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Plant Tracker - Shared</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Plant Tracker - Professional</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * { -webkit-tap-highlight-color: transparent; }
+        .slide-up { animation: slideUp 0.3s ease-out; }
+        @keyframes slideUp { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .fade-in { animation: fadeIn 0.3s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .status-due { background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%); }
+        .status-check { background: linear-gradient(135deg, #eab308 0%, #ca8a04 100%); }
+        .status-snoozed { background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); }
+        .status-ok { background: linear-gradient(135deg, #10b981 0%, #059669 100%); }
+    </style>
 </head>
 <body class="bg-gray-50">
-    <div id="app" class="min-h-screen"></div>
-    
+    <div id="app"></div>
+    <div id="modal-container"></div>
+    <div id="toast-container" class="fixed top-4 right-4 z-50 pointer-events-none"></div>
+
     <script>
-    // Plant Tracker App with D1 Database
-    let currentRole = localStorage.getItem('role') || null;
-    let plants = [];
-    let rooms = [];
+    // ============================================
+    // Plant Tracker - Complete Professional Version
+    // ============================================
+    
+    // Global State
+    const state = {
+        currentRole: localStorage.getItem('role') || null,
+        plants: [],
+        rooms: [],
+        careEvents: [],
+        filters: {
+            status: null,
+            room: null,
+            species: null,
+            lightLevel: null,
+            search: ''
+        },
+        view: 'dashboard',
+        selectedPlant: null,
+        loading: false,
+        lastSync: null
+    };
 
-    // API base URL (will be set after deployment)
-    const API_BASE = '/api';
+    // API Configuration
+    const API = {
+        base: '/api',
+        async request(endpoint, options = {}) {
+            try {
+                const response = await fetch(`${this.base}${endpoint}`, {
+                    headers: { 'Content-Type': 'application/json' },
+                    ...options
+                });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                return await response.json();
+            } catch (error) {
+                console.error('API Error:', error);
+                throw error;
+            }
+        }
+    };
 
-    // Initialize app
-    async function init() {
-        if (!currentRole) {
-            showRoleSelector();
+    // ============================================
+    // Core Functions
+    // ============================================
+
+    function calculatePlantStatus(plant) {
+        if (!plant.lastWateredAt) {
+            return { status: 'Due', urgency: 0, daysUntilWater: -plant.waterIntervalDays };
+        }
+        
+        const now = new Date();
+        const lastWatered = new Date(plant.lastWateredAt);
+        const daysSince = Math.floor((now - lastWatered) / (1000 * 60 * 60 * 24));
+        const daysUntilWater = plant.waterIntervalDays - daysSince;
+        
+        // Check if snoozed
+        if (plant.snoozedUntil && new Date(plant.snoozedUntil) > now) {
+            return { status: 'Snoozed', urgency: 3, daysUntilWater, snoozedUntil: plant.snoozedUntil };
+        }
+        
+        let status, urgency;
+        if (daysUntilWater <= 0) {
+            status = 'Due';
+            urgency = 0;
+        } else if (daysUntilWater <= 2) {
+            status = 'Needs Check';
+            urgency = 1;
         } else {
-            await loadData();
-            showDashboard();
+            status = 'OK';
+            urgency = 2;
+        }
+        
+        const daysUntilFertilize = plant.lastFertilizedAt 
+            ? plant.fertilizeIntervalDays - Math.floor((now - new Date(plant.lastFertilizedAt)) / (1000 * 60 * 60 * 24))
+            : -plant.fertilizeIntervalDays;
+        
+        return { status, urgency, daysUntilWater, daysUntilFertilize, daysSince };
+    }
+
+    function sortPlantsByUrgency(plants) {
+        return plants.sort((a, b) => {
+            if (a.statusInfo.urgency !== b.statusInfo.urgency) {
+                return a.statusInfo.urgency - b.statusInfo.urgency;
+            }
+            return a.statusInfo.daysUntilWater - b.statusInfo.daysUntilWater;
+        });
+    }
+
+    async function loadData() {
+        state.loading = true;
+        try {
+            const [roomsData, plantsData] = await Promise.all([
+                API.request('/rooms'),
+                API.request('/plants')
+            ]);
+            
+            state.rooms = roomsData || [];
+            state.plants = (plantsData || []).map(plant => ({
+                ...plant,
+                statusInfo: calculatePlantStatus(plant)
+            }));
+            
+            state.lastSync = new Date();
+            render();
+        } catch (error) {
+            showToast('Failed to load data', 'error');
+        } finally {
+            state.loading = false;
         }
     }
 
-    // Show role selector
-    function showRoleSelector() {
-        document.getElementById('app').innerHTML = `
-            <div class="max-w-md mx-auto mt-10 p-6">
-                <h1 class="text-3xl font-bold mb-2">🌱 Plant Tracker</h1>
-                <p class="text-gray-600 mb-6">Shared plant care system - everyone sees the same plants!</p>
-                <p class="font-medium mb-4">Who are you?</p>
-                <div class="space-y-2">
-                    ${['Ben', 'Jared', 'Guest1', 'Guest2'].map(role => `
-                        <button onclick="selectRole('${role}')" 
-                                class="w-full p-4 bg-green-500 text-white rounded-lg hover:bg-green-600">
-                            ${role}
-                        </button>
-                    `).join('')}
+    // ============================================
+    // UI Components
+    // ============================================
+
+    function showToast(message, type = 'info') {
+        const colors = {
+            success: 'bg-green-600',
+            error: 'bg-red-600',
+            info: 'bg-blue-600',
+            warning: 'bg-yellow-600'
+        };
+        
+        const toast = document.createElement('div');
+        toast.className = `${colors[type]} text-white px-6 py-3 rounded-lg shadow-lg mb-2 pointer-events-auto fade-in`;
+        toast.innerHTML = `
+            <div class="flex items-center">
+                <span>${message}</span>
+            </div>
+        `;
+        
+        document.getElementById('toast-container').appendChild(toast);
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+
+    function showModal(content) {
+        const modal = document.createElement('div');
+        modal.className = 'fixed inset-0 bg-black/50 z-40 flex items-end sm:items-center justify-center fade-in';
+        modal.innerHTML = `
+            <div class="bg-white w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl max-h-[90vh] overflow-y-auto slide-up">
+                ${content}
+            </div>
+        `;
+        
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) closeModal();
+        });
+        
+        document.getElementById('modal-container').innerHTML = '';
+        document.getElementById('modal-container').appendChild(modal);
+    }
+
+    function closeModal() {
+        document.getElementById('modal-container').innerHTML = '';
+    }
+
+    // ============================================
+    // Views
+    // ============================================
+
+    function renderRoleSelector() {
+        return `
+            <div class="min-h-screen flex items-center justify-center p-4">
+                <div class="max-w-md w-full">
+                    <div class="bg-white rounded-2xl shadow-xl p-8">
+                        <div class="text-center mb-8">
+                            <div class="text-6xl mb-4">🌱</div>
+                            <h1 class="text-3xl font-bold text-gray-900 mb-2">Plant Tracker</h1>
+                            <p class="text-gray-600">Shared plant care system</p>
+                        </div>
+                        
+                        <p class="text-sm text-gray-700 mb-6 text-center">
+                            Select your identity to track who performs plant care
+                        </p>
+                        
+                        <div class="space-y-3">
+                            ${['Ben', 'Jared', 'Guest1', 'Guest2'].map(role => `
+                                <button onclick="selectRole('${role}')" 
+                                        class="w-full p-4 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 transform hover:scale-[1.02] transition-all font-medium text-lg shadow-md">
+                                    <i class="fas fa-user mr-2"></i> ${role}
+                                </button>
+                            `).join('')}
+                        </div>
+                        
+                        <p class="text-xs text-gray-500 text-center mt-6">
+                            All users share the same plant database
+                        </p>
+                    </div>
                 </div>
-                <p class="text-xs text-gray-500 mt-4">
-                    Note: This only identifies who performs actions. All users share the same plant database.
-                </p>
             </div>
         `;
     }
 
-    // Select role
-    async function selectRole(role) {
-        currentRole = role;
-        localStorage.setItem('role', role);
-        await loadData();
-        showDashboard();
-    }
-
-    // Load data from API
-    async function loadData() {
-        try {
-            // Load rooms
-            const roomsRes = await fetch(`${API_BASE}/rooms`);
-            rooms = await roomsRes.json();
-            
-            // Load plants
-            const plantsRes = await fetch(`${API_BASE}/plants`);
-            plants = await plantsRes.json();
-            
-            // Calculate days until water for display
-            plants = plants.map(plant => ({
-                ...plant,
-                daysUntilWater: calculateDaysUntil(plant.lastWateredAt, plant.waterIntervalDays),
-                daysUntilFertilize: calculateDaysUntil(plant.lastFertilizedAt, plant.fertilizeIntervalDays)
-            }));
-        } catch (error) {
-            console.error('Error loading data:', error);
-        }
-    }
-
-    // Calculate days until next care
-    function calculateDaysUntil(lastDate, interval) {
-        if (!lastDate) return -interval;
-        const last = new Date(lastDate);
-        const now = new Date();
-        const daysSince = Math.floor((now - last) / (1000 * 60 * 60 * 24));
-        return interval - daysSince;
-    }
-
-    // Show dashboard
-    function showDashboard() {
-        const needWater = plants.filter(p => p.daysUntilWater <= 0).length;
-        const checkSoon = plants.filter(p => p.daysUntilWater > 0 && p.daysUntilWater <= 2).length;
+    function renderDashboard() {
+        // Apply filters
+        let filteredPlants = [...state.plants];
         
-        document.getElementById('app').innerHTML = `
-            <div class="max-w-6xl mx-auto p-4 pb-20">
-                <!-- Header -->
-                <div class="bg-white rounded-lg shadow-sm p-4 mb-4">
-                    <div class="flex justify-between items-center">
-                        <div>
-                            <h1 class="text-2xl font-bold">🌱 Plant Tracker</h1>
-                            <p class="text-sm text-gray-600">Shared Database - All users see the same plants</p>
+        if (state.filters.status) {
+            filteredPlants = filteredPlants.filter(p => p.statusInfo.status === state.filters.status);
+        }
+        if (state.filters.room) {
+            filteredPlants = filteredPlants.filter(p => p.roomId == state.filters.room);
+        }
+        if (state.filters.lightLevel) {
+            filteredPlants = filteredPlants.filter(p => p.lightLevel === state.filters.lightLevel);
+        }
+        if (state.filters.search) {
+            const search = state.filters.search.toLowerCase();
+            filteredPlants = filteredPlants.filter(p => 
+                p.species.toLowerCase().includes(search) ||
+                (p.nickname && p.nickname.toLowerCase().includes(search))
+            );
+        }
+        
+        // Group by room
+        const plantsByRoom = {};
+        state.rooms.forEach(room => {
+            plantsByRoom[room.id] = {
+                name: room.name,
+                plants: sortPlantsByUrgency(filteredPlants.filter(p => p.roomId == room.id))
+            };
+        });
+        
+        // Count statuses
+        const statusCounts = {
+            'Due': state.plants.filter(p => p.statusInfo.status === 'Due').length,
+            'Needs Check': state.plants.filter(p => p.statusInfo.status === 'Needs Check').length,
+            'Snoozed': state.plants.filter(p => p.statusInfo.status === 'Snoozed').length,
+            'OK': state.plants.filter(p => p.statusInfo.status === 'OK').length
+        };
+        
+        return `
+            <!-- Fixed Header -->
+            <div class="sticky top-0 z-30 bg-white shadow-sm">
+                <div class="px-4 py-3">
+                    <div class="flex justify-between items-center mb-3">
+                        <h1 class="text-2xl font-bold text-gray-900">
+                            <i class="fas fa-leaf text-green-600 mr-2"></i>Plant Tracker
+                        </h1>
+                        <div class="flex items-center gap-2">
+                            <button onclick="loadData()" class="p-2 text-gray-600 hover:bg-gray-100 rounded-lg">
+                                <i class="fas fa-sync-alt"></i>
+                            </button>
+                            <div class="text-right">
+                                <div class="text-xs text-gray-500">Logged in as</div>
+                                <div class="font-medium text-gray-900">${state.currentRole}</div>
+                            </div>
                         </div>
-                        <div class="text-right">
-                            <p class="text-sm text-gray-600">Logged in as:</p>
-                            <p class="font-medium">${currentRole}</p>
-                        </div>
+                    </div>
+                    
+                    <!-- Status Filter Chips -->
+                    <div class="flex gap-2 overflow-x-auto pb-2">
+                        ${Object.entries(statusCounts).map(([status, count]) => {
+                            const colors = {
+                                'Due': 'bg-red-500',
+                                'Needs Check': 'bg-yellow-500',
+                                'Snoozed': 'bg-blue-500',
+                                'OK': 'bg-green-500'
+                            };
+                            const isActive = state.filters.status === status;
+                            return `
+                                <button onclick="toggleStatusFilter('${status}')" 
+                                        class="${isActive ? colors[status] + ' text-white' : 'bg-gray-100 text-gray-700'} 
+                                               px-4 py-2 rounded-full text-sm font-medium whitespace-nowrap transition-colors">
+                                    ${status} (${count})
+                                </button>
+                            `;
+                        }).join('')}
+                    </div>
+                    
+                    <!-- Search Bar -->
+                    <div class="mt-3 relative">
+                        <i class="fas fa-search absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"></i>
+                        <input type="text" 
+                               placeholder="Search plants..." 
+                               value="${state.filters.search}"
+                               oninput="updateSearch(this.value)"
+                               class="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500">
                     </div>
                 </div>
-
-                <!-- Status Overview -->
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-                    <div class="bg-red-100 p-3 rounded-lg">
-                        <div class="text-2xl font-bold text-red-600">${needWater}</div>
-                        <div class="text-xs text-red-800">Need Water Now</div>
+            </div>
+            
+            <!-- Main Content -->
+            <div class="p-4 pb-24">
+                <!-- Plant Limit Warning -->
+                ${state.plants.length >= 45 ? `
+                    <div class="mb-4 p-3 bg-yellow-100 border border-yellow-300 rounded-lg">
+                        <p class="text-sm text-yellow-800">
+                            <i class="fas fa-exclamation-triangle mr-2"></i>
+                            ${state.plants.length}/50 plants - ${50 - state.plants.length} slots remaining
+                        </p>
                     </div>
-                    <div class="bg-yellow-100 p-3 rounded-lg">
-                        <div class="text-2xl font-bold text-yellow-600">${checkSoon}</div>
-                        <div class="text-xs text-yellow-800">Check Soon</div>
-                    </div>
-                    <div class="bg-green-100 p-3 rounded-lg">
-                        <div class="text-2xl font-bold text-green-600">${plants.filter(p => p.daysUntilWater > 2).length}</div>
-                        <div class="text-xs text-green-800">Doing OK</div>
-                    </div>
-                    <div class="bg-blue-100 p-3 rounded-lg">
-                        <div class="text-2xl font-bold text-blue-600">${plants.length}/50</div>
-                        <div class="text-xs text-blue-800">Total Plants</div>
-                    </div>
-                </div>
-
-                <!-- Add Plant Button -->
-                ${plants.length < 50 ? `
-                    <button onclick="showAddPlantForm()" 
-                            class="w-full md:w-auto px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 mb-4">
-                        + Add New Plant
-                    </button>
-                ` : `
-                    <div class="bg-yellow-100 border border-yellow-300 p-3 rounded-lg mb-4">
-                        Maximum 50 plants reached!
-                    </div>
-                `}
-
-                <!-- Plants List -->
-                <div class="space-y-3">
-                    ${plants.length === 0 ? `
-                        <div class="bg-white p-8 rounded-lg text-center text-gray-500">
-                            <p class="text-xl mb-2">No plants yet!</p>
-                            <p>Be the first to add a plant to the shared collection</p>
-                        </div>
-                    ` : plants.sort((a, b) => a.daysUntilWater - b.daysUntilWater).map(plant => {
-                        const room = rooms.find(r => r.id === plant.roomId);
-                        return `
-                            <div class="bg-white p-4 rounded-lg shadow-sm">
-                                <div class="flex justify-between items-start">
-                                    <div>
-                                        <h3 class="font-bold text-lg">
-                                            ${plant.nickname || plant.species}
-                                            ${plant.nickname ? `<span class="text-gray-500 font-normal text-sm">(${plant.species})</span>` : ''}
-                                        </h3>
-                                        <p class="text-sm text-gray-600">
-                                            📍 ${room?.name || 'Unknown'} | 
-                                            ☀️ ${plant.lightLevel} light | 
-                                            💧 Every ${plant.waterIntervalDays} days
-                                        </p>
-                                        <p class="text-xs text-gray-500 mt-1">
-                                            Added by ${plant.addedBy} on ${new Date(plant.createdAt).toLocaleDateString()}
-                                        </p>
-                                    </div>
-                                    <div class="text-right">
-                                        ${plant.daysUntilWater <= 0 ? `
-                                            <span class="inline-block px-3 py-1 bg-red-500 text-white rounded-full text-sm">
-                                                💧 Water Now!
-                                            </span>
-                                        ` : plant.daysUntilWater <= 2 ? `
-                                            <span class="inline-block px-3 py-1 bg-yellow-500 text-white rounded-full text-sm">
-                                                Check in ${plant.daysUntilWater} day${plant.daysUntilWater === 1 ? '' : 's'}
-                                            </span>
-                                        ` : `
-                                            <span class="inline-block px-3 py-1 bg-green-500 text-white rounded-full text-sm">
-                                                OK for ${plant.daysUntilWater} days
-                                            </span>
-                                        `}
-                                    </div>
-                                </div>
-                                <div class="mt-3 flex gap-2">
-                                    <button onclick="waterPlant(${plant.id})" 
-                                            class="px-3 py-1 bg-blue-500 text-white text-sm rounded hover:bg-blue-600">
-                                        💧 Mark as Watered
-                                    </button>
-                                    <button onclick="showPlantHistory(${plant.id})" 
-                                            class="px-3 py-1 bg-gray-500 text-white text-sm rounded hover:bg-gray-600">
-                                        📜 History
-                                    </button>
-                                    <button onclick="deletePlant(${plant.id})" 
-                                            class="px-3 py-1 bg-red-500 text-white text-sm rounded hover:bg-red-600">
-                                        🗑️ Remove
-                                    </button>
+                ` : ''}
+                
+                <!-- Plants by Room -->
+                <div class="space-y-4">
+                    ${Object.entries(plantsByRoom).map(([roomId, room]) => `
+                        <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+                            <div class="bg-gradient-to-r from-gray-50 to-gray-100 px-4 py-3 border-b">
+                                <div class="flex justify-between items-center">
+                                    <h2 class="font-semibold text-gray-900">
+                                        <i class="fas fa-door-open text-gray-600 mr-2"></i>
+                                        ${room.name}
+                                    </h2>
+                                    <span class="text-sm text-gray-500">${room.plants.length} plants</span>
                                 </div>
                             </div>
-                        `;
-                    }).join('')}
+                            <div class="p-4">
+                                ${room.plants.length === 0 ? `
+                                    <p class="text-center text-gray-400 py-8">No plants in this room</p>
+                                ` : `
+                                    <div class="grid gap-3">
+                                        ${room.plants.map(plant => renderPlantCard(plant)).join('')}
+                                    </div>
+                                `}
+                            </div>
+                        </div>
+                    `).join('')}
                 </div>
-
-                <!-- Footer -->
-                <div class="mt-8 text-center text-sm text-gray-500">
-                    <button onclick="loadData().then(showDashboard)" class="text-blue-500 hover:underline">
-                        🔄 Refresh Data
+                
+                <!-- Empty State -->
+                ${filteredPlants.length === 0 && state.filters.search ? `
+                    <div class="bg-white rounded-xl shadow-sm p-8 text-center">
+                        <i class="fas fa-search text-4xl text-gray-300 mb-4"></i>
+                        <p class="text-gray-500">No plants found matching your search</p>
+                    </div>
+                ` : ''}
+            </div>
+            
+            <!-- FAB -->
+            ${state.plants.length < 50 ? `
+                <button onclick="showAddPlantModal()" 
+                        class="fixed bottom-20 right-4 w-14 h-14 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-full shadow-lg hover:shadow-xl transform hover:scale-110 transition-all">
+                    <i class="fas fa-plus text-xl"></i>
+                </button>
+            ` : ''}
+            
+            <!-- Bottom Navigation -->
+            <div class="fixed bottom-0 left-0 right-0 bg-white border-t shadow-lg">
+                <div class="grid grid-cols-4 h-16">
+                    <button onclick="setView('dashboard')" class="flex flex-col items-center justify-center text-green-600">
+                        <i class="fas fa-home text-xl mb-1"></i>
+                        <span class="text-xs">Home</span>
                     </button>
-                    <span class="mx-2">|</span>
-                    <button onclick="showRoleSelector()" class="hover:underline">
-                        Switch Role
+                    <button onclick="showRoomsModal()" class="flex flex-col items-center justify-center text-gray-600 hover:text-gray-900">
+                        <i class="fas fa-door-open text-xl mb-1"></i>
+                        <span class="text-xs">Rooms</span>
+                    </button>
+                    <button onclick="showExportModal()" class="flex flex-col items-center justify-center text-gray-600 hover:text-gray-900">
+                        <i class="fas fa-download text-xl mb-1"></i>
+                        <span class="text-xs">Export</span>
+                    </button>
+                    <button onclick="showSettingsModal()" class="flex flex-col items-center justify-center text-gray-600 hover:text-gray-900">
+                        <i class="fas fa-cog text-xl mb-1"></i>
+                        <span class="text-xs">Settings</span>
                     </button>
                 </div>
             </div>
         `;
     }
 
-    // Show add plant form
-    function showAddPlantForm() {
-        document.getElementById('app').innerHTML = `
-            <div class="max-w-md mx-auto mt-10 p-6 bg-white rounded-lg shadow">
-                <h2 class="text-2xl font-bold mb-4">Add New Plant</h2>
-                <form onsubmit="addPlant(event)">
-                    <div class="mb-3">
-                        <label class="block text-sm font-medium mb-1">Species *</label>
-                        <input type="text" id="species" required 
-                               class="w-full p-2 border rounded">
+    function renderPlantCard(plant) {
+        const statusColors = {
+            'Due': 'status-due',
+            'Needs Check': 'status-check',
+            'Snoozed': 'status-snoozed',
+            'OK': 'status-ok'
+        };
+        
+        const lightIcons = {
+            'low': '☁️',
+            'medium': '⛅',
+            'bright': '☀️',
+            'direct': '🌞'
+        };
+        
+        return `
+            <div class="bg-gray-50 rounded-lg p-4 hover:shadow-md transition-shadow cursor-pointer" 
+                 onclick="showPlantQuickPanel(${plant.id})">
+                <div class="flex justify-between items-start mb-2">
+                    <div class="flex-1">
+                        <h3 class="font-semibold text-gray-900 text-lg">
+                            ${plant.nickname || plant.species}
+                        </h3>
+                        ${plant.nickname ? `<p class="text-sm text-gray-600">${plant.species}</p>` : ''}
                     </div>
-                    
-                    <div class="mb-3">
-                        <label class="block text-sm font-medium mb-1">Nickname</label>
-                        <input type="text" id="nickname" 
-                               class="w-full p-2 border rounded">
+                    <span class="${statusColors[plant.statusInfo.status]} text-white px-3 py-1 rounded-full text-xs font-medium">
+                        ${plant.statusInfo.status}
+                    </span>
+                </div>
+                
+                <div class="flex items-center gap-4 text-sm text-gray-600 mb-3">
+                    <span>${lightIcons[plant.lightLevel]} ${plant.lightLevel}</span>
+                    <span><i class="fas fa-tint text-blue-500"></i> ${plant.statusInfo.daysSince !== undefined ? plant.statusInfo.daysSince + 'd ago' : 'Never'}</span>
+                    <span><i class="fas fa-calendar"></i> Every ${plant.waterIntervalDays}d</span>
+                </div>
+                
+                ${plant.statusInfo.snoozedUntil ? `
+                    <div class="text-xs text-blue-600">
+                        <i class="fas fa-clock"></i> Snoozed until ${new Date(plant.statusInfo.snoozedUntil).toLocaleDateString()}
                     </div>
-                    
-                    <div class="mb-3">
-                        <label class="block text-sm font-medium mb-1">Room *</label>
-                        <select id="roomId" required class="w-full p-2 border rounded">
-                            ${rooms.map(room => 
-                                `<option value="${room.id}">${room.name}</option>`
-                            ).join('')}
-                        </select>
+                ` : ''}
+                
+                <div class="flex gap-2 mt-3">
+                    <button onclick="event.stopPropagation(); quickWaterPlant(${plant.id})" 
+                            class="flex-1 px-3 py-1.5 bg-blue-500 text-white text-sm rounded-lg hover:bg-blue-600 transition-colors">
+                        <i class="fas fa-tint mr-1"></i> Water
+                    </button>
+                    <button onclick="event.stopPropagation(); showPlantDetails(${plant.id})" 
+                            class="px-3 py-1.5 bg-gray-500 text-white text-sm rounded-lg hover:bg-gray-600 transition-colors">
+                        <i class="fas fa-info-circle"></i>
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
+    // ============================================
+    // Modals
+    // ============================================
+
+    function showPlantQuickPanel(plantId) {
+        const plant = state.plants.find(p => p.id === plantId);
+        if (!plant) return;
+        
+        const content = `
+            <div class="p-6">
+                <div class="flex justify-between items-start mb-4">
+                    <div>
+                        <h2 class="text-xl font-bold text-gray-900">${plant.nickname || plant.species}</h2>
+                        ${plant.nickname ? `<p class="text-gray-600">${plant.species}</p>` : ''}
                     </div>
-                    
-                    <div class="mb-3">
-                        <label class="block text-sm font-medium mb-1">Light Level *</label>
-                        <select id="lightLevel" required class="w-full p-2 border rounded">
-                            <option value="low">Low Light</option>
-                            <option value="medium">Medium Light</option>
-                            <option value="bright">Bright Light</option>
-                            <option value="direct">Direct Sun</option>
+                    <button onclick="closeModal()" class="p-2 hover:bg-gray-100 rounded-lg">
+                        <i class="fas fa-times text-gray-600"></i>
+                    </button>
+                </div>
+                
+                <div class="bg-gray-50 rounded-lg p-4 mb-4">
+                    <div class="grid grid-cols-2 gap-3 text-sm">
+                        <div>
+                            <span class="text-gray-600">Last watered:</span>
+                            <p class="font-medium">${plant.lastWateredAt ? new Date(plant.lastWateredAt).toLocaleDateString() : 'Never'}</p>
+                        </div>
+                        <div>
+                            <span class="text-gray-600">Last fertilized:</span>
+                            <p class="font-medium">${plant.lastFertilizedAt ? new Date(plant.lastFertilizedAt).toLocaleDateString() : 'Never'}</p>
+                        </div>
+                        <div>
+                            <span class="text-gray-600">Water interval:</span>
+                            <p class="font-medium">${plant.waterIntervalDays} days</p>
+                        </div>
+                        <div>
+                            <span class="text-gray-600">Status:</span>
+                            <p class="font-medium">${plant.statusInfo.status}</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <form id="quick-care-form" onsubmit="event.preventDefault(); saveQuickCare(${plant.id})">
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Soil Moisture</label>
+                        <select id="moisture" class="w-full p-2 border rounded-lg">
+                            <option value="Wet">Wet</option>
+                            <option value="Moist" selected>Moist</option>
+                            <option value="Top Dry">Top Dry</option>
+                            <option value="Fully Dry">Fully Dry</option>
                         </select>
                     </div>
                     
                     <div class="mb-4">
-                        <label class="block text-sm font-medium mb-1">Water Every (days) *</label>
-                        <input type="number" id="waterIntervalDays" required 
-                               class="w-full p-2 border rounded"
-                               min="1" max="60" value="7">
+                        <label class="flex items-center p-3 bg-blue-50 rounded-lg cursor-pointer">
+                            <input type="checkbox" id="watered" class="mr-3 h-5 w-5 text-blue-600">
+                            <span class="font-medium">Watered?</span>
+                        </label>
+                    </div>
+                    
+                    <div id="water-interval-section" class="mb-4 hidden">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Next water in (days)</label>
+                        <div class="flex gap-2 mb-2">
+                            ${[3, 5, 7, 10, 14].map(d => `
+                                <button type="button" onclick="setWaterInterval(${d})" 
+                                        class="px-3 py-1 border rounded-lg hover:bg-gray-50">
+                                    ${d}
+                                </button>
+                            `).join('')}
+                        </div>
+                        <input type="number" id="waterInterval" value="${plant.waterIntervalDays}" 
+                               min="1" max="60" class="w-full p-2 border rounded-lg">
+                    </div>
+                    
+                    <div id="snooze-section" class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Snooze for</label>
+                        <div class="flex gap-2">
+                            <button type="button" onclick="setSnoozeDays(1)" 
+                                    class="px-3 py-1 border rounded-lg hover:bg-gray-50">1 day</button>
+                            <button type="button" onclick="setSnoozeDays(2)" 
+                                    class="px-3 py-1 border rounded-lg hover:bg-gray-50">2 days</button>
+                            <button type="button" onclick="setSnoozeDays(3)" 
+                                    class="px-3 py-1 border rounded-lg hover:bg-gray-50">3 days</button>
+                            <input type="number" id="snoozeDays" placeholder="Custom" 
+                                   min="0" max="14" class="flex-1 p-1 border rounded-lg">
+                        </div>
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Notes (optional)</label>
+                        <textarea id="notes" rows="2" class="w-full p-2 border rounded-lg" 
+                                  placeholder="Any observations..."></textarea>
                     </div>
                     
                     <div class="flex gap-2">
-                        <button type="submit" 
-                                class="flex-1 p-2 bg-green-500 text-white rounded hover:bg-green-600">
-                            Add Plant
-                        </button>
-                        <button type="button" onclick="showDashboard()" 
-                                class="flex-1 p-2 bg-gray-300 rounded hover:bg-gray-400">
+                        <button type="button" onclick="closeModal()" 
+                                class="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
                             Cancel
+                        </button>
+                        <button type="submit" 
+                                class="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                            Add Plant
                         </button>
                     </div>
                 </form>
             </div>
         `;
+        showModal(content);
     }
 
-    // Add plant
-    async function addPlant(event) {
-        event.preventDefault();
+    function showSettingsModal() {
+        const content = `
+            <div class="p-6">
+                <h2 class="text-xl font-bold text-gray-900 mb-4">Settings</h2>
+                
+                <div class="space-y-4">
+                    <div class="p-4 bg-gray-50 rounded-lg">
+                        <p class="text-sm text-gray-600 mb-2">Current Role</p>
+                        <p class="font-medium text-lg">${state.currentRole}</p>
+                    </div>
+                    
+                    <button onclick="confirmChangeRole()" 
+                            class="w-full p-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600">
+                        <i class="fas fa-user-switch mr-2"></i> Change Role
+                    </button>
+                    
+                    <div class="border-t pt-4">
+                        <h3 class="font-medium mb-3">Data Management</h3>
+                        <button onclick="exportData()" 
+                                class="w-full p-3 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 mb-2">
+                            <i class="fas fa-download mr-2"></i> Export All Data
+                        </button>
+                        <button onclick="showStatsModal()" 
+                                class="w-full p-3 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200">
+                            <i class="fas fa-chart-bar mr-2"></i> View Statistics
+                        </button>
+                    </div>
+                    
+                    <div class="border-t pt-4">
+                        <p class="text-xs text-gray-500 text-center">
+                            Plant Tracker v1.0<br>
+                            Last sync: ${state.lastSync ? new Date(state.lastSync).toLocaleTimeString() : 'Never'}
+                        </p>
+                    </div>
+                </div>
+                
+                <button onclick="closeModal()" 
+                        class="mt-4 w-full p-3 border border-gray-300 rounded-lg hover:bg-gray-50">
+                    Close
+                </button>
+            </div>
+        `;
+        showModal(content);
+    }
+
+    function showRoomsModal() {
+        const content = `
+            <div class="p-6">
+                <h2 class="text-xl font-bold text-gray-900 mb-4">Manage Rooms</h2>
+                
+                <div class="space-y-2 mb-4">
+                    ${state.rooms.map(room => {
+                        const plantCount = state.plants.filter(p => p.roomId == room.id).length;
+                        return `
+                            <div class="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
+                                <div>
+                                    <p class="font-medium">${room.name}</p>
+                                    <p class="text-sm text-gray-600">${plantCount} plants</p>
+                                </div>
+                                <button onclick="editRoom(${room.id})" 
+                                        class="p-2 text-blue-600 hover:bg-blue-50 rounded">
+                                    <i class="fas fa-edit"></i>
+                                </button>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+                
+                <div class="border-t pt-4">
+                    <form onsubmit="event.preventDefault(); addRoom()">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Add New Room</label>
+                        <div class="flex gap-2">
+                            <input type="text" id="newRoomName" 
+                                   placeholder="Room name" 
+                                   class="flex-1 p-2 border rounded-lg">
+                            <button type="submit" 
+                                    class="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                                Add
+                            </button>
+                        </div>
+                    </form>
+                </div>
+                
+                <button onclick="closeModal()" 
+                        class="mt-4 w-full p-3 border border-gray-300 rounded-lg hover:bg-gray-50">
+                    Close
+                </button>
+            </div>
+        `;
+        showModal(content);
+    }
+
+    function showExportModal() {
+        const content = `
+            <div class="p-6">
+                <h2 class="text-xl font-bold text-gray-900 mb-4">Export Data</h2>
+                
+                <div class="space-y-4">
+                    <div class="p-4 bg-blue-50 rounded-lg">
+                        <h3 class="font-medium mb-2">Export Options</h3>
+                        <p class="text-sm text-gray-600">Choose your export format:</p>
+                    </div>
+                    
+                    <button onclick="exportCSV()" 
+                            class="w-full p-3 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                        <i class="fas fa-file-csv mr-2"></i> Export as CSV
+                    </button>
+                    
+                    <button onclick="exportJSON()" 
+                            class="w-full p-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                        <i class="fas fa-file-code mr-2"></i> Export as JSON
+                    </button>
+                    
+                    <div class="text-sm text-gray-600 text-center">
+                        Exports include all plants, rooms, and care history
+                    </div>
+                </div>
+                
+                <button onclick="closeModal()" 
+                        class="mt-4 w-full p-3 border border-gray-300 rounded-lg hover:bg-gray-50">
+                    Close
+                </button>
+            </div>
+        `;
+        showModal(content);
+    }
+
+    function showStatsModal() {
+        const totalWaterNeeded = state.plants.filter(p => p.statusInfo.status === 'Due').length;
+        const avgWaterInterval = state.plants.reduce((acc, p) => acc + p.waterIntervalDays, 0) / state.plants.length || 0;
         
+        const content = `
+            <div class="p-6">
+                <h2 class="text-xl font-bold text-gray-900 mb-4">Statistics</h2>
+                
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="p-4 bg-gray-50 rounded-lg text-center">
+                        <div class="text-2xl font-bold text-gray-900">${state.plants.length}</div>
+                        <div class="text-sm text-gray-600">Total Plants</div>
+                    </div>
+                    <div class="p-4 bg-gray-50 rounded-lg text-center">
+                        <div class="text-2xl font-bold text-gray-900">${state.rooms.length}</div>
+                        <div class="text-sm text-gray-600">Rooms</div>
+                    </div>
+                    <div class="p-4 bg-gray-50 rounded-lg text-center">
+                        <div class="text-2xl font-bold text-red-600">${totalWaterNeeded}</div>
+                        <div class="text-sm text-gray-600">Need Water</div>
+                    </div>
+                    <div class="p-4 bg-gray-50 rounded-lg text-center">
+                        <div class="text-2xl font-bold text-blue-600">${avgWaterInterval.toFixed(1)}</div>
+                        <div class="text-sm text-gray-600">Avg Water Days</div>
+                    </div>
+                </div>
+                
+                <div class="mt-4 p-4 bg-blue-50 rounded-lg">
+                    <h3 class="font-medium mb-2">Light Distribution</h3>
+                    ${['low', 'medium', 'bright', 'direct'].map(level => {
+                        const count = state.plants.filter(p => p.lightLevel === level).length;
+                        const percent = (count / state.plants.length * 100) || 0;
+                        return `
+                            <div class="mb-2">
+                                <div class="flex justify-between text-sm mb-1">
+                                    <span>${level}</span>
+                                    <span>${count} plants</span>
+                                </div>
+                                <div class="bg-gray-200 rounded-full h-2">
+                                    <div class="bg-green-600 rounded-full h-2" style="width: ${percent}%"></div>
+                                </div>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+                
+                <button onclick="closeModal()" 
+                        class="mt-4 w-full p-3 border border-gray-300 rounded-lg hover:bg-gray-50">
+                    Close
+                </button>
+            </div>
+        `;
+        showModal(content);
+    }
+
+    function showPlantDetails(plantId) {
+        const plant = state.plants.find(p => p.id === plantId);
+        if (!plant) return;
+        
+        API.request(`/plants/${plantId}/events`).then(events => {
+            const content = `
+                <div class="p-6">
+                    <div class="flex justify-between items-start mb-4">
+                        <div>
+                            <h2 class="text-xl font-bold text-gray-900">${plant.nickname || plant.species}</h2>
+                            ${plant.nickname ? `<p class="text-gray-600">${plant.species}</p>` : ''}
+                        </div>
+                        <button onclick="closeModal()" class="p-2 hover:bg-gray-100 rounded-lg">
+                            <i class="fas fa-times text-gray-600"></i>
+                        </button>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-4 mb-4">
+                        <div class="p-3 bg-gray-50 rounded-lg">
+                            <p class="text-xs text-gray-600">Room</p>
+                            <p class="font-medium">${state.rooms.find(r => r.id == plant.roomId)?.name}</p>
+                        </div>
+                        <div class="p-3 bg-gray-50 rounded-lg">
+                            <p class="text-xs text-gray-600">Light</p>
+                            <p class="font-medium">${plant.lightLevel}</p>
+                        </div>
+                        <div class="p-3 bg-gray-50 rounded-lg">
+                            <p class="text-xs text-gray-600">Water Interval</p>
+                            <p class="font-medium">${plant.waterIntervalDays} days</p>
+                        </div>
+                        <div class="p-3 bg-gray-50 rounded-lg">
+                            <p class="text-xs text-gray-600">Added By</p>
+                            <p class="font-medium">${plant.addedBy}</p>
+                        </div>
+                    </div>
+                    
+                    <div class="border-t pt-4">
+                        <h3 class="font-medium mb-3">Care History</h3>
+                        <div class="space-y-2 max-h-60 overflow-y-auto">
+                            ${events && events.length > 0 ? events.map(event => `
+                                <div class="flex items-start gap-3 p-2 bg-gray-50 rounded">
+                                    <div class="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center text-xs">
+                                        ${event.performedBy[0]}
+                                    </div>
+                                    <div class="flex-1">
+                                        <p class="text-sm">
+                                            <span class="font-medium">${event.performedBy}</span>
+                                            ${event.eventType === 'water' ? ' watered' : ` performed ${event.eventType}`}
+                                        </p>
+                                        <p class="text-xs text-gray-500">
+                                            ${new Date(event.performedAt).toLocaleString()}
+                                        </p>
+                                        ${event.notes ? `<p class="text-xs mt-1">${event.notes}</p>` : ''}
+                                    </div>
+                                </div>
+                            `).join('') : '<p class="text-gray-500 text-center">No care history yet</p>'}
+                        </div>
+                    </div>
+                    
+                    <div class="flex gap-2 mt-4">
+                        <button onclick="confirmDeletePlant(${plant.id})" 
+                                class="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
+                            <i class="fas fa-trash mr-2"></i> Delete Plant
+                        </button>
+                        <button onclick="closeModal()" 
+                                class="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50">
+                            Close
+                        </button>
+                    </div>
+                </div>
+            `;
+            showModal(content);
+        });
+    }
+
+    // ============================================
+    // Actions
+    // ============================================
+
+    function selectRole(role) {
+        state.currentRole = role;
+        localStorage.setItem('role', role);
+        loadData();
+    }
+
+    function toggleStatusFilter(status) {
+        state.filters.status = state.filters.status === status ? null : status;
+        render();
+    }
+
+    function updateSearch(value) {
+        state.filters.search = value;
+        render();
+    }
+
+    function setWaterInterval(days) {
+        document.getElementById('waterInterval').value = days;
+    }
+
+    function setSnoozeDays(days) {
+        document.getElementById('snoozeDays').value = days;
+    }
+
+    async function quickWaterPlant(plantId) {
+        try {
+            await API.request(`/plants/${plantId}/water`, {
+                method: 'POST',
+                body: JSON.stringify({ performedBy: state.currentRole })
+            });
+            showToast('Plant watered!', 'success');
+            await loadData();
+        } catch (error) {
+            showToast('Failed to water plant', 'error');
+        }
+    }
+
+    async function saveQuickCare(plantId) {
+        const watered = document.getElementById('watered').checked;
+        const moisture = document.getElementById('moisture').value;
+        const notes = document.getElementById('notes').value;
+        
+        try {
+            if (watered) {
+                const interval = document.getElementById('waterInterval').value;
+                await API.request(`/plants/${plantId}/water`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        performedBy: state.currentRole,
+                        moisture,
+                        interval,
+                        notes
+                    })
+                });
+                showToast('Plant watered!', 'success');
+            } else {
+                const snoozeDays = document.getElementById('snoozeDays').value;
+                if (snoozeDays) {
+                    await API.request(`/plants/${plantId}/snooze`, {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            performedBy: state.currentRole,
+                            days: parseInt(snoozeDays),
+                            notes
+                        })
+                    });
+                    showToast(`Plant snoozed for ${snoozeDays} days`, 'success');
+                }
+            }
+            
+            closeModal();
+            await loadData();
+        } catch (error) {
+            showToast('Failed to save', 'error');
+        }
+    }
+
+    async function addPlant() {
         const plantData = {
             species: document.getElementById('species').value,
             nickname: document.getElementById('nickname').value,
             roomId: parseInt(document.getElementById('roomId').value),
             lightLevel: document.getElementById('lightLevel').value,
             waterIntervalDays: parseInt(document.getElementById('waterIntervalDays').value),
-            addedBy: currentRole
+            fertilizeIntervalDays: parseInt(document.getElementById('fertilizeIntervalDays').value || 30),
+            addedBy: state.currentRole
         };
         
         try {
-            const response = await fetch(`${API_BASE}/plants`, {
+            await API.request('/plants', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(plantData)
             });
-            
-            if (response.ok) {
-                await loadData();
-                showDashboard();
-                showToast('Plant added successfully!', 'success');
-            } else {
-                showToast('Error adding plant', 'error');
-            }
+            showToast('Plant added successfully!', 'success');
+            closeModal();
+            await loadData();
         } catch (error) {
-            showToast('Network error', 'error');
+            showToast('Failed to add plant', 'error');
         }
     }
 
-    // Water plant
-    async function waterPlant(plantId) {
-        try {
-            const response = await fetch(`${API_BASE}/plants/${plantId}/water`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ performedBy: currentRole })
-            });
-            
-            if (response.ok) {
-                await loadData();
-                showDashboard();
-                showToast('Plant watered!', 'success');
-            }
-        } catch (error) {
-            showToast('Error watering plant', 'error');
-        }
-    }
-
-    // Delete plant
-    async function deletePlant(plantId) {
-        if (!confirm('Remove this plant? This cannot be undone.')) return;
+    async function addRoom() {
+        const name = document.getElementById('newRoomName').value;
+        if (!name) return;
         
         try {
-            const response = await fetch(`${API_BASE}/plants/${plantId}`, {
-                method: 'DELETE'
+            await API.request('/rooms', {
+                method: 'POST',
+                body: JSON.stringify({ name, orderIndex: state.rooms.length + 1 })
             });
-            
-            if (response.ok) {
-                await loadData();
-                showDashboard();
-                showToast('Plant removed', 'success');
-            }
+            showToast('Room added!', 'success');
+            document.getElementById('newRoomName').value = '';
+            await loadData();
+            showRoomsModal(); // Refresh the modal
         } catch (error) {
-            showToast('Error removing plant', 'error');
+            showToast('Failed to add room', 'error');
         }
     }
 
-    // Show plant history
-    async function showPlantHistory(plantId) {
-        try {
-            const response = await fetch(`${API_BASE}/plants/${plantId}/events`);
-            const events = await response.json();
-            const plant = plants.find(p => p.id === plantId);
-            
-            let historyHtml = events.map(event => `
-                <div class="border-l-2 border-gray-200 pl-3 py-2">
-                    <p class="text-sm">
-                        <span class="font-medium">${event.performedBy}</span>
-                        ${event.eventType === 'water' ? '💧 watered' : '📝 ' + event.eventType}
-                    </p>
-                    <p class="text-xs text-gray-500">
-                        ${new Date(event.performedAt).toLocaleString()}
-                    </p>
-                </div>
-            `).join('');
-            
-            if (events.length === 0) {
-                historyHtml = '<p class="text-gray-500">No history yet</p>';
-            }
-            
-            document.getElementById('app').innerHTML = `
-                <div class="max-w-md mx-auto mt-10 p-6 bg-white rounded-lg shadow">
-                    <h2 class="text-xl font-bold mb-4">
-                        History: ${plant.nickname || plant.species}
-                    </h2>
-                    <div class="space-y-1 mb-4">
-                        ${historyHtml}
-                    </div>
-                    <button onclick="showDashboard()" 
-                            class="w-full p-2 bg-gray-300 rounded hover:bg-gray-400">
-                        Back to Dashboard
-                    </button>
-                </div>
-            `;
-        } catch (error) {
-            showToast('Error loading history', 'error');
+    function confirmChangeRole() {
+        if (confirm('Are you sure you want to change your role? This will refresh the app.')) {
+            localStorage.removeItem('role');
+            state.currentRole = null;
+            render();
         }
     }
 
-    // Show toast notification
-    function showToast(message, type = 'info') {
-        const colors = {
-            success: 'bg-green-500',
-            error: 'bg-red-500',
-            info: 'bg-blue-500'
+    function confirmDeletePlant(plantId) {
+        if (confirm('Are you sure you want to delete this plant? This cannot be undone.')) {
+            API.request(`/plants/${plantId}`, { method: 'DELETE' })
+                .then(() => {
+                    showToast('Plant deleted', 'success');
+                    closeModal();
+                    loadData();
+                })
+                .catch(() => showToast('Failed to delete plant', 'error'));
+        }
+    }
+
+    function exportCSV() {
+        const plantsCSV = [
+            ['ID', 'Species', 'Nickname', 'Room', 'Light Level', 'Water Interval', 'Last Watered', 'Added By'],
+            ...state.plants.map(p => [
+                p.id,
+                p.species,
+                p.nickname || '',
+                state.rooms.find(r => r.id == p.roomId)?.name || '',
+                p.lightLevel,
+                p.waterIntervalDays,
+                p.lastWateredAt || '',
+                p.addedBy
+            ])
+        ].map(row => row.join(',')).join('\n');
+        
+        const blob = new Blob([plantsCSV], { type: 'text/csv' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `plant-tracker-${new Date().toISOString().split('T')[0]}.csv`;
+        a.click();
+        showToast('Data exported as CSV', 'success');
+    }
+
+    function exportJSON() {
+        const data = {
+            exportDate: new Date().toISOString(),
+            plants: state.plants,
+            rooms: state.rooms,
+            currentRole: state.currentRole
         };
         
-        const toast = document.createElement('div');
-        toast.className = `fixed top-4 right-4 px-4 py-2 text-white rounded-lg shadow-lg ${colors[type]} z-50`;
-        toast.textContent = message;
-        document.body.appendChild(toast);
-        
-        setTimeout(() => toast.remove(), 3000);
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `plant-tracker-${new Date().toISOString().split('T')[0]}.json`;
+        a.click();
+        showToast('Data exported as JSON', 'success');
     }
 
-    // Start app
+    // ============================================
+    // Main Render Function
+    // ============================================
+
+    function render() {
+        const app = document.getElementById('app');
+        
+        if (!state.currentRole) {
+            app.innerHTML = renderRoleSelector();
+        } else {
+            app.innerHTML = renderDashboard();
+        }
+    }
+
+    // ============================================
+    // Initialize App
+    // ============================================
+
+    async function init() {
+        if (state.currentRole) {
+            await loadData();
+        }
+        render();
+        
+        // Auto-refresh every 30 seconds
+        setInterval(() => {
+            if (state.currentRole) loadData();
+        }, 30000);
+    }
+
+    // Start the app
     init();
     </script>
 </body>
-</html>
+</html>:bg-gray-50">
+                            Cancel
+                        </button>
+                        <button type="submit" 
+                                class="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                            Save
+                        </button>
+                    </div>
+                </form>
+            </div>
+        `;
+        
+        showModal(content);
+        
+        // Setup form interactions
+        document.getElementById('watered').addEventListener('change', (e) => {
+            document.getElementById('water-interval-section').classList.toggle('hidden', !e.target.checked);
+            document.getElementById('snooze-section').classList.toggle('hidden', e.target.checked);
+        });
+    }
+
+    function showAddPlantModal() {
+        const content = `
+            <div class="p-6">
+                <h2 class="text-xl font-bold text-gray-900 mb-4">Add New Plant</h2>
+                
+                <form id="add-plant-form" onsubmit="event.preventDefault(); addPlant()">
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Species *</label>
+                        <input type="text" id="species" required 
+                               class="w-full p-2 border rounded-lg" 
+                               placeholder="e.g., Monstera, Snake Plant">
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Nickname</label>
+                        <input type="text" id="nickname" 
+                               class="w-full p-2 border rounded-lg" 
+                               placeholder="e.g., Monty">
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Room *</label>
+                        <select id="roomId" required class="w-full p-2 border rounded-lg">
+                            ${state.rooms.map(room => 
+                                `<option value="${room.id}">${room.name}</option>`
+                            ).join('')}
+                        </select>
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Light Level *</label>
+                        <select id="lightLevel" required class="w-full p-2 border rounded-lg">
+                            <option value="low">☁️ Low Light</option>
+                            <option value="medium">⛅ Medium Light</option>
+                            <option value="bright">☀️ Bright Light</option>
+                            <option value="direct">🌞 Direct Sun</option>
+                        </select>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-4 mb-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Water Every (days) *</label>
+                            <input type="number" id="waterIntervalDays" required 
+                                   class="w-full p-2 border rounded-lg"
+                                   min="1" max="60" value="7">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Fertilize Every (days)</label>
+                            <input type="number" id="fertilizeIntervalDays" 
+                                   class="w-full p-2 border rounded-lg"
+                                   min="7" max="120" value="30">
+                        </div>
+                    </div>
+                    
+                    <div class="flex gap-2">
+                        <button type="button" onclick="closeModal()" 
+                                class="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover
